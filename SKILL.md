@@ -16,22 +16,47 @@ Read, create, edit Word documents on Windows using `python-docx`.
 
 ---
 
-## Quick Reference
+## Bundled Scripts
 
-| Task | Method | Section |
-|------|--------|---------|
-| Read .docx text | `python ~/.config/opencode/skills/docx/scripts/extract_docx.py file.docx` | [Reading](#reading-docx) |
-| Read .doc text | Convert to .docx first, then read | [.doc Handling](#doc-handling) |
-| Create new .docx | Write a .py script with `python-docx` | [Creating](#creating-docx) |
-| Edit .docx (simple) | `python edit_docx.py in.docx out.docx --replace "old" "new"` | [Editing](#editing-docx) |
-| Fill template form | `python edit_docx.py template.docx out.docx --fill map.json` | [Editing](#editing-docx) |
-| Track changes | Unpack ZIP → edit XML → repack | [OOXML Reference](#ooxml-reference) |
+| Script | Purpose |
+|--------|---------|
+| `scripts/extract_docx.py` | Read .docx → Markdown. Full extraction, structure outline, range/section/grep modes |
+| `scripts/edit_docx.py` | CLI editing: replace, insert, delete, fill, paragraph-level ops, range-scoped edits |
+| `scripts/apply_theme.py` | Apply format-spec themes to documents via Word style system |
+| `scripts/latex2omml.py` | Convert LaTeX formulas to OMML XML for .docx embedding |
+| `scripts/convert_to_doc.py` | Convert .docx to legacy .doc (MS Word COM or LibreOffice) |
+| `scripts/merge_runs.py` | Unpack .docx and merge adjacent runs with identical formatting (fix split-run bug) |
 
 **Script paths**: PowerShell does NOT expand `~`. Use full absolute path to bundled scripts, or copy them to working directory first.
 
 ---
 
+## Quick Reference
+
+| Task | Method | Section |
+|------|--------|---------|
+| Read .docx (full) | `python extract_docx.py file.docx` | [Reading](#reading-docx) |
+| Get document outline | `python extract_docx.py file.docx --structure` | [Chunking & Search](#chunking--search-modes) |
+| Extract paragraph range | `python extract_docx.py file.docx --range 10-25` | [Chunking & Search](#chunking--search-modes) |
+| Extract by section name | `python extract_docx.py file.docx --section "Results"` | [Chunking & Search](#chunking--search-modes) |
+| Search in document | `python extract_docx.py file.docx --grep "keyword" --context 2` | [Chunking & Search](#chunking--search-modes) |
+| Read .doc text | Convert to .docx first, then read | [.doc Handling](#doc-handling) |
+| Convert .docx → .doc | `python convert_to_doc.py in.docx [out.doc]` | [.doc Handling](#doc-handling) |
+| Create new .docx | Write a .py script with `python-docx` | [Creating](#creating-docx) |
+| Apply format theme | `from apply_theme import load_theme, apply_theme` | [Theme System](#theme-system) |
+| Insert LaTeX formula | `from latex2omml import insert_formula` | [LaTeX Formulas](#latex-formulas) |
+| Edit .docx (replace) | `python edit_docx.py in.docx out.docx --replace "old" "new"` | [Editing](#editing-docx) |
+| Edit paragraphs | `python edit_docx.py in.docx out.docx --paragraph 3 "new text"` | [Paragraph Editing](#paragraph-level-editing) |
+| Edit within range | `python edit_docx.py in.docx out.docx --range 10-25 --replace "a" "b"` | [Editing](#editing-docx) |
+| Fill template form | `python edit_docx.py template.docx out.docx --fill map.json` | [Editing](#editing-docx) |
+| Fix split-run bug | `python merge_runs.py in.docx unpacked/` | [Editing](#editing-docx) |
+| Track changes | Unpack ZIP → edit XML → repack | [OOXML Reference](#ooxml-reference) |
+
+---
+
 ## Reading .docx
+
+### Full Extraction
 
 ```powershell
 # Full path:
@@ -43,6 +68,75 @@ python extract_docx.py report.docx
 ```
 
 Outputs `report_extracted.md` with headings and tables preserved.
+
+### Chunking & Search Modes
+
+For large documents (>30 pages), use chunking modes to avoid context blowup. Each mode targets only the relevant portion:
+
+#### `--structure` — Document Outline
+
+Outputs heading hierarchy with paragraph ranges and table associations. No body text — ~100-300 tokens.
+
+```powershell
+python extract_docx.py thesis.docx --structure
+# Output:
+# [document]  thesis.docx  (186 paragraphs, 12 tables)
+# +-- Heading 1 (p0):  第一章 引言               [p0-p15,  table:1]
+# |   +-- Heading 2 (p1): 1.1 研究背景            [p1-p5]
+# |   +-- Heading 2 (p6): 1.2 国内外现状           [p6-p12]
+# |   +-- Heading 2 (p13): 1.3 本文工作            [p13-p15]
+# +-- Heading 1 (p16): 第二章 系统模型              [p16-p45, table:2]
+```
+
+Headings are detected by Word style (Heading 1/2/3). For documents without styles, add `--detect-freeform` to use regex-based heading detection (patterns like "第X章", "1.1 Title", etc.).
+
+```powershell
+python extract_docx.py report.docx --structure --detect-freeform
+# Free-form headings show confidence scores: H1 H2 [conf:0.95]
+```
+
+`--detect-freeform` requires `--structure` (error if used alone).
+
+#### `--range N-M` — Extract Paragraph Range
+
+Only extracts paragraphs N through M (0-based indexing). Tables within the range are included.
+
+```powershell
+python extract_docx.py thesis.docx --range 16-45
+# Output: thesis_range_16_45.md
+```
+
+Errors on invalid ranges (N < 1, N > M, M exceeds document length).
+
+#### `--section "name"` — Extract by Section Name
+
+Matches section heading by substring (case-insensitive). Extracts that section and all its sub-sections.
+
+```powershell
+python extract_docx.py thesis.docx --section "系统模型"
+# Output: thesis_section_系统模型.md
+
+# Exact match only:
+python extract_docx.py thesis.docx --section "系统模型" --exact
+
+# Non-existent section → clear error message
+python extract_docx.py thesis.docx --section "nonexistent"
+# Error: no section matching "nonexistent"
+```
+
+#### `--grep "pattern"` — Full-Text Search
+
+Searches all paragraphs and returns matches with surrounding context.
+
+```powershell
+python extract_docx.py thesis.docx --grep "RFocus" --context 2
+# Output:
+# [p42] "...采用了RFocus技术中的majority voting算法..."
+#   <- p40: "反向散射通信是物联网领域的..."
+#   -> p43: "该算法通过迭代优化实现..."
+#
+# [p78] "...RFocus系统由3000根天线..."
+```
 
 For custom processing, write a .py script:
 
@@ -110,17 +204,35 @@ def set_chinese_font(run, font_name):
 run2 = p.add_run(' 中文宋体 ')
 set_chinese_font(run2, 'SimSun')
 
-# Math formula (OMML injection)
-omml = '''<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
-  <m:oMath><m:r><m:t>E</m:t></m:r><m:r><m:t>=</m:t></m:r>
-  <m:r><m:t>m</m:t></m:r><m:r><m:t>c</m:t></m:r>
-  <m:sSup><m:e/><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>
-</m:oMath></m:oMathPara>'''
-run = p.add_run('')
-run._element.append(etree.fromstring(omml))
+# Math formula — use latex2omml.py instead of raw OMML (see LaTeX Formulas section)
+from latex2omml import insert_formula
+insert_formula(p, r"E = mc^2")
 
 doc.save('output.docx')
 ```
+
+### Using the Theme System
+
+For thesis/formal documents with strict formatting requirements, use the theme system instead of manual formatting:
+
+```python
+from apply_theme import load_theme, apply_theme, themed
+
+# Load a theme (available: thesis-sjtu, thesis-generic)
+theme = load_theme('format-spec/thesis-sjtu.md', degree='硕士')
+apply_theme(doc, theme)
+
+# Then add content using Word styles — formatting is automatic:
+doc.add_paragraph('第一章 引言', style='Heading 1')
+doc.add_paragraph('正文内容...', style='Normal')
+
+# themed() context manager provides helper methods
+with themed(doc, theme) as t:
+    t.add_figure('chart.png', '图1 系统架构图')
+    t.add_table(headers=['参数', '数值'], rows=[['频率', '2.4GHz'], ['功率', '10dBm']])
+```
+
+See [Theme System](#theme-system) for details on creating custom themes.
 
 ### Visual Verification (Render → Inspect → Fix)
 
@@ -159,13 +271,52 @@ This is the Anthropic approach — by merging runs before editing, text replacem
 ### Fast Path (CLI)
 
 ```powershell
+# Simple find-and-replace
 python edit_docx.py in.docx out.docx --replace "旧文本" "新文本"
-python edit_docx.py in.docx out.docx --list                        # list all paragraphs
+
+# Multiple replacements
+python edit_docx.py in.docx out.docx --replace "张三" "李四" --replace "2024" "2025"
+
+# List all paragraphs (quick overview)
+python edit_docx.py in.docx out.docx --list
+
+# Insert after paragraph 3
 python edit_docx.py in.docx out.docx --insert-after 3 "新段落"
+
+# Delete paragraph 5
 python edit_docx.py in.docx out.docx --delete 5
+
+# Fill template blanks from JSON
 python edit_docx.py template.docx done.docx --fill replacements.json
 # replacements.json: {"姓名：": "姓名：张三", "学号：": "学号：2024001"}
+
+# Replace only within paragraph range 2-5 (0-based)
+python edit_docx.py in.docx out.docx --range 2-5 --replace "天线" "antenna"
 ```
+
+### Paragraph-Level Editing
+
+Target individual paragraphs by index (0-based, from `--structure` or `--list`):
+
+```powershell
+# Replace entire paragraph (preserves formatting of first run)
+python edit_docx.py in.docx out.docx --paragraph 2 "New paragraph text"
+
+# Replace paragraph content from a file
+python edit_docx.py in.docx out.docx --paragraph 2 --file content.md
+
+# Append text to end of paragraph
+python edit_docx.py in.docx out.docx --paragraph 3 --append " (updated 2026)"
+
+# Prepend text to start of paragraph
+python edit_docx.py in.docx out.docx --paragraph 3 --prepend "Note: "
+
+# Set paragraph style (e.g., convert body text to heading)
+python edit_docx.py in.docx out.docx --set-style 0 "Heading 1"
+python edit_docx.py in.docx out.docx --set-style 0 "Heading 1" --set-style 2 "Heading 2"
+```
+
+All paragraph index operations validate bounds — out-of-range indices produce clear error messages.
 
 ### Script Path (Custom Logic)
 
@@ -231,6 +382,186 @@ def replace_image(docx_path, out_path, old_media_name, new_image_path):
 
 ---
 
+## Theme System
+
+For documents with strict formatting requirements (thesis, official reports), use the theme system to apply consistent formatting via Word styles — no per-run manual formatting.
+
+### Available Themes
+
+| Theme File | Description |
+|------------|-------------|
+| `format-spec/thesis-sjtu.md` | 上海交通大学学位论文 (SJTU thesis) |
+| `format-spec/thesis-generic.md` | 通用中国学位论文 GB/T 7713 (generic Chinese thesis) |
+
+### Usage
+
+```python
+from apply_theme import load_theme, apply_theme, themed
+
+# Load theme (replace {degree} placeholder with "硕士"/"博士")
+theme = load_theme('format-spec/thesis-sjtu.md', degree='硕士')
+apply_theme(doc, theme)
+
+# Then add content using Word styles — formatting is automatic:
+doc.add_paragraph('第一章 引言', style='Heading 1')
+doc.add_paragraph('正文内容...', style='Normal')
+
+# themed() context manager adds helper methods
+with themed(doc, theme) as t:
+    t.add_figure('system.png', '图1 系统架构图')
+    t.add_table(
+        headers=['参数', '数值'],
+        rows=[['频率', '2.4GHz'], ['功率', '10dBm']]
+    )
+```
+
+### How It Works
+
+`apply_theme()` configures Word's built-in styles (Heading 1/2/3, Normal, etc.) with the font, size, spacing, and alignment defined in the theme file. It handles:
+
+- **Chinese fonts correctly** — sets both `w:ascii` and `w:eastAsia` attributes
+- **Page setup** — margins, page size
+- **Header/footer** — with `{degree}` placeholder substitution
+- **All required sections** — cover, abstract, TOC, headings, body, header, footer
+- **Optional sections** — figures, tables, references
+
+### Creating Custom Themes
+
+Theme files live under `format-spec/`. Full schema: `format-spec/THEME-SCHEMA.md`.
+
+Minimal theme skeleton:
+
+```ini
+[document]
+page_width     = 21cm
+page_height    = 29.7cm
+margin_top     = 2.5cm
+margin_bottom  = 2.5cm
+margin_left    = 3.0cm
+margin_right   = 2.5cm
+
+[cover]
+title_font     = SimHei
+title_size     = 22pt
+title_color    = 000000
+title_bold     = true
+title_align    = center
+info_font      = SimSun
+info_size      = 14pt
+info_color     = 000000
+info_align     = center
+
+[abstract]
+heading_font        = SimHei
+heading_size        = 18pt
+heading_bold        = true
+heading_align       = center
+heading_text        = 摘要
+body_font           = SimSun
+body_size           = 12pt
+body_line_spacing   = 1.5
+keywords_label      = 关键词：
+keywords_label_font = SimHei
+keywords_font       = SimSun
+
+[heading1]
+font = SimHei
+size = 16pt
+color = 000000
+bold = true
+align = center
+before_spacing = 12pt
+after_spacing = 6pt
+
+[heading2]
+font = SimHei
+size = 14pt
+color = 000000
+bold = true
+align = left
+before_spacing = 6pt
+after_spacing = 3pt
+
+[heading3]
+font = SimHei
+size = 12pt
+color = 000000
+bold = true
+align = left
+before_spacing = 3pt
+after_spacing = 3pt
+
+[body]
+font = SimSun
+size = 12pt
+color = 000000
+line_spacing = 1.5
+first_line_indent = 0.74cm
+before_spacing = 0pt
+after_spacing = 0pt
+
+[header]
+font = SimSun
+size = 9pt
+color = 000000
+text = {degree}学位论文
+
+[footer]
+font = SimSun
+size = 9pt
+color = 000000
+page_number_align = center
+```
+
+---
+
+## LaTeX Formulas
+
+Convert LaTeX math expressions to OMML (Office Math Markup Language) for native .docx embedding — no MathType, no images, no copy-paste from Word's equation editor.
+
+### Usage
+
+```python
+from latex2omml import latex_to_omml, insert_formula
+
+# Get OMML XML string
+omml = latex_to_omml(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
+
+# Or insert directly into a paragraph
+from docx import Document
+doc = Document()
+p = doc.add_paragraph()
+p.add_run('The quadratic formula: ')
+insert_formula(p, r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
+doc.save('math.docx')
+```
+
+### CLI Quick Test
+
+```powershell
+python latex2omml.py "E = mc^2"
+# Outputs OMML XML to stdout
+```
+
+### Supported LaTeX Constructs
+
+| LaTeX | Description | Example |
+|-------|-------------|---------|
+| `x^{n}` / `x_{n}` | Superscript / subscript | `a_i^2` |
+| `\frac{a}{b}` | Fraction | `\frac{1}{2}` |
+| `\sqrt{x}` / `\sqrt[n]{x}` | Square root / nth root | `\sqrt{a+b}` |
+| `\sum`, `\int`, `\prod` | Large operators | `\sum_{i=1}^n` |
+| `\pm`, `\cdot`, `\times` | Binary operators | `a \pm b` |
+| `\alpha`, `\beta`, `\pi` | Greek letters | `\alpha + \beta` |
+| `\infty`, `\partial`, `\nabla` | Special symbols | `\infty` |
+| `\sin`, `\cos`, `\log` | Standard functions | `\sin(x)` |
+| `\text{...}` | Text within math | `x \text{ where } x>0` |
+| `\left( ... \right)` | Auto-sized parentheses | `\left(\frac{a}{b}\right)` |
+
+If a LaTeX construct isn't supported, the converter raises an error with the unsupported element name. For complex formulas, write OMML XML directly (see [OOXML Reference > Math Formulas](#math-formulas-omml)).
+
+---
+
 ## .doc Handling
 
 `.doc` is binary — `python-docx` can't read it. Convert to `.docx` first:
@@ -251,6 +582,22 @@ def doc_to_docx(path):
 Or: `soffice --headless --convert-to docx input.doc --outdir .` (requires LibreOffice).
 
 Or: ask user to open in Word → Save As `.docx`.
+
+### Converting .docx → .doc (Legacy Format)
+
+Use the bundled `convert_to_doc.py` script:
+
+```powershell
+python convert_to_doc.py report.docx
+# Output: report.doc (MS Word COM on Windows, LibreOffice fallback)
+
+python convert_to_doc.py report.docx legacy_report.doc
+# Custom output path
+```
+
+The script auto-detects the best conversion method:
+1. **Windows**: MS Word COM via `pywin32` (requires `pip install pywin32`)
+2. **Cross-platform fallback**: LibreOffice `soffice` (must be in PATH)
 
 ---
 
@@ -347,9 +694,10 @@ Unicode: `\u00B1`=±, `\u2211`=∑, `\u222B`=∫, `\u221E`=∞, `\u03C0`=π.
 |---------|---------|---------|
 | `python-docx` | `pip install python-docx` | Core: read, create, edit .docx |
 | `lxml` | comes with python-docx | XML parsing for OOXML/OMML |
+| `latex2mathml` | `pip install latex2mathml` | LaTeX → MathML (used by latex2omml.py) |
 | `mammoth` | `pip install mammoth` | Alternative: .docx→Markdown |
-| `pywin32` | `pip install pywin32` | .doc→.docx via MS Word COM |
-| LibreOffice | `winget install LibreOffice.LibreOffice` | .doc→.docx, PDF export |
+| `pywin32` | `pip install pywin32` | .doc→.docx / .docx→.doc via MS Word COM |
+| LibreOffice | `winget install LibreOffice.LibreOffice` | .doc→.docx, PDF export, .docx→.doc |
 
 ---
 
@@ -370,6 +718,9 @@ Professional document delivery standards (adapted from OpenAI's doc skill):
 - **.doc** must be converted to .docx before reading
 - For tracked changes / comments: use the OOXML workflow (unpack ZIP → edit XML → repack)
 - **Bundled scripts** (in `~/.config/opencode/skills/docx/scripts/`):
-  - `extract_docx.py` — read .docx → Markdown
-  - `edit_docx.py` — CLI editing (replace, insert, delete, fill)
+  - `extract_docx.py` — read .docx → Markdown (full, structure, range, section, grep)
+  - `edit_docx.py` — CLI editing (replace, insert, delete, fill, paragraph ops, range-scoped edits)
+  - `apply_theme.py` — apply format-spec themes via Word style system
+  - `latex2omml.py` — LaTeX → OMML formula conversion
+  - `convert_to_doc.py` — .docx → legacy .doc conversion
   - `merge_runs.py` — unpack + merge adjacent runs (fix split-run at XML level)

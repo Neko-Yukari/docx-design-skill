@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Edit .docx files with robust text replacement and structural edits.
-Usage: python edit_docx.py <input.docx> <output.docx> [--replace OLD NEW]... [--insert-after N TEXT] [--delete N]
+Usage: python edit_docx.py <input.docx> <output.docx> [--replace OLD NEW]... [--range N-M --replace OLD NEW]... [--insert-after N TEXT] [--delete N] [--set-style N "StyleName"]... [--paragraph N "TEXT"|--file PATH|--append TEXT|--prepend TEXT]
 
 Examples:
   # Simple find-and-replace
@@ -10,17 +10,37 @@ Examples:
   # Multiple replacements
   python edit_docx.py in.docx out.docx --replace "张三" "李四" --replace "2024" "2025"
 
+  # Replace only within paragraph range 2-5
+  python edit_docx.py in.docx out.docx --range 2-5 --replace "天线" "antenna"
+
   # Insert text after paragraph 3
   python edit_docx.py in.docx out.docx --insert-after 3 "This is a new paragraph."
 
   # Delete paragraph 5
   python edit_docx.py in.docx out.docx --delete 5
 
+  # Set paragraph style (e.g., "Heading 1", "Normal")
+  python edit_docx.py in.docx out.docx --set-style 2 "Heading 1"
+
+  # Multiple style changes
+  python edit_docx.py in.docx out.docx --set-style 0 "Heading 1" --set-style 2 "Heading 2"
+
+  # Set paragraph text (replace entire paragraph N)
+  python edit_docx.py in.docx out.docx --paragraph 2 "New paragraph text"
+
+  # Replace paragraph text from file content
+  python edit_docx.py in.docx out.docx --paragraph 2 --file content.md
+
+  # Append/prepend text to paragraph
+  python edit_docx.py in.docx out.docx --paragraph 3 --append " (updated)"
+  python edit_docx.py in.docx out.docx --paragraph 3 --prepend "Note: "
+
   # Combined: fill template blanks
   python edit_docx.py template.docx report.docx --replace "姓名：" "姓名：张三" --replace "学号：" "学号：2024001"
 """
 import sys
 import os
+import re
 from docx import Document
 from docx.oxml.ns import qn
 from copy import deepcopy
@@ -244,7 +264,44 @@ def main():
     while i < len(args):
         cmd = args[i]
 
-        if cmd == '--replace' and i + 2 < len(args):
+        if cmd == '--range':
+            if i + 3 >= len(args):
+                print("Error: --range requires --replace", file=sys.stderr)
+                sys.exit(1)
+            range_str = args[i + 1]
+            # --range requires --replace
+            if args[i + 2] != '--replace':
+                print("Error: --range requires --replace", file=sys.stderr)
+                sys.exit(1)
+            old = args[i + 3]
+            new = args[i + 4] if i + 4 < len(args) else ''
+
+            # Parse and validate range N-M
+            m = re.match(r'^(\d+)-(\d+)$', range_str)
+            if not m:
+                print(f"Error: invalid range format '{range_str}'. Expected N-M (e.g., 2-5)", file=sys.stderr)
+                sys.exit(1)
+            n = int(m.group(1))
+            r_end = int(m.group(2))
+            para_count = len(doc.paragraphs)
+
+            if n < 0 or r_end >= para_count:
+                print(f"Error: range {n}-{r_end} out of bounds (document has paragraphs 0-{para_count - 1})", file=sys.stderr)
+                sys.exit(1)
+            if n > r_end:
+                print(f"Error: invalid range: start ({n}) > end ({r_end})", file=sys.stderr)
+                sys.exit(1)
+
+            # Range-limited replace (body paragraphs only, no tables/headers)
+            count = 0
+            for idx in range(n, r_end + 1):
+                if replace_in_paragraph(doc.paragraphs[idx], old, new):
+                    count += 1
+
+            print(f"Range [{n}-{r_end}]: replaced '{old}' -> '{new}': {count} occurrences")
+            i += 5
+
+        elif cmd == '--replace' and i + 2 < len(args):
             old = args[i + 1]
             new = args[i + 2]
             count = replace_all(doc, old, new)
@@ -261,6 +318,16 @@ def main():
             idx = int(args[i + 1])
             delete_paragraph(doc, idx)
             i += 2
+
+        elif cmd == '--set-style' and i + 2 < len(args):
+            idx = int(args[i + 1])
+            style_name = args[i + 2]
+            if idx < 0 or idx >= len(doc.paragraphs):
+                print(f"Error: paragraph index {idx} out of range (0-{len(doc.paragraphs)-1})", file=sys.stderr)
+                sys.exit(1)
+            doc.paragraphs[idx].style = doc.styles[style_name]
+            print(f"Set paragraph {idx} style to '{style_name}'")
+            i += 3
 
         elif cmd == '--list':
             max_show = int(args[i + 1]) if i + 1 < len(args) and args[i + 1].isdigit() else None
@@ -280,6 +347,71 @@ def main():
                 count = replace_all(doc, old, new)
                 print(f"Replace '{old}' -> '{new}': {count} occurrences")
             i += 2
+
+        elif cmd == '--paragraph' and i + 2 < len(args):
+            idx = int(args[i + 1])
+            # Look ahead for sub-options: text, --file, --append, --prepend
+            j = i + 2
+            text_val = None
+            file_path = None
+            append_val = None
+            prepend_val = None
+
+            while j < len(args):
+                if args[j] == '--file' and j + 1 < len(args):
+                    file_path = args[j + 1]
+                    j += 2
+                elif args[j] == '--append' and j + 1 < len(args):
+                    append_val = args[j + 1]
+                    j += 2
+                elif args[j] == '--prepend' and j + 1 < len(args):
+                    prepend_val = args[j + 1]
+                    j += 2
+                elif args[j].startswith('--'):
+                    break
+                else:
+                    text_val = args[j]
+                    j += 1
+
+            # Validate conflicts
+            if file_path and text_val:
+                print("Error: --file and inline text are mutually exclusive", file=sys.stderr)
+                sys.exit(1)
+            if append_val and prepend_val:
+                print("Error: --append and --prepend are mutually exclusive", file=sys.stderr)
+                sys.exit(1)
+
+            # Validate index
+            if idx < 0 or idx >= len(doc.paragraphs):
+                print(f"Error: paragraph index {idx} out of range (0-{len(doc.paragraphs)-1})", file=sys.stderr)
+                sys.exit(1)
+
+            para = doc.paragraphs[idx]
+
+            if file_path:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        new_text = f.read()
+                except FileNotFoundError:
+                    print(f"Error: file not found: {file_path}", file=sys.stderr)
+                    sys.exit(1)
+                set_paragraph_text(para, new_text)
+                print(f"Set paragraph {idx} to content of '{file_path}'")
+            elif append_val is not None:
+                current_text = para.text
+                new_text = current_text + " " + append_val
+                set_paragraph_text(para, new_text)
+                print(f"Appended to paragraph {idx}")
+            elif prepend_val is not None:
+                current_text = para.text
+                new_text = prepend_val + " " + current_text
+                set_paragraph_text(para, new_text)
+                print(f"Prepended to paragraph {idx}")
+            elif text_val is not None:
+                set_paragraph_text(para, text_val)
+                print(f"Set paragraph {idx} to '{text_val}'")
+
+            i = j
 
         else:
             print(f"Unknown command: {cmd}")
