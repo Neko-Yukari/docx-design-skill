@@ -78,11 +78,23 @@ doc.save('output.docx')
 ### 命令行使用
 
 ```powershell
-# 读取文档
+# 读取文档（全文）
 python scripts/extract_docx.py report.docx
+
+# 获取文档大纲（仅结构，约 300 tokens）
+python scripts/extract_docx.py thesis.docx --structure
+
+# 按章节名称提取
+python scripts/extract_docx.py thesis.docx --section "结果分析"
+
+# 在文档中搜索关键词
+python scripts/extract_docx.py thesis.docx --grep "关键词" --context 2
 
 # 编辑文档
 python scripts/edit_docx.py template.docx output.docx --replace "旧文字" "新文字"
+
+# 编辑指定段落
+python scripts/edit_docx.py in.docx out.docx --paragraph 3 "新的段落内容"
 
 # 转换 LaTeX 为 OMML
 python scripts/latex2omml.py "x^2 + y^2 = z^2"
@@ -124,10 +136,11 @@ align = center
 
 | 模块 | 用途 |
 |------|------|
-| `extract_docx.py` | 读取 .docx → Markdown |
-| `edit_docx.py` | CLI 编辑（替换、插入、删除、模板填充） |
+| `extract_docx.py` | 读取 .docx → Markdown（全文、大纲结构、段落范围、章节提取、关键词搜索） |
+| `edit_docx.py` | CLI 编辑（替换、插入、删除、段落操作、范围限定编辑、模板填充） |
 | `apply_theme.py` | 解析主题 → 覆盖 Word 样式 → 生成内容 |
 | `latex2omml.py` | LaTeX → MathML → OMML（稳健的公式嵌入） |
+| `convert_to_doc.py` | 将 .docx 转换为旧版 .doc 格式 |
 | `merge_runs.py` | XML 级别 run 合并（修复 Word 的分段渲染问题） |
 
 ---

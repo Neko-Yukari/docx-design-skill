@@ -72,11 +72,23 @@ doc.save('output.docx')
 ### Command Line
 
 ```powershell
-# Read a document
+# Read a document (full text)
 python scripts/extract_docx.py report.docx
+
+# Get document outline (structure only, ~300 tokens)
+python scripts/extract_docx.py thesis.docx --structure
+
+# Extract a specific section
+python scripts/extract_docx.py thesis.docx --section "Results"
+
+# Search within a document
+python scripts/extract_docx.py thesis.docx --grep "keyword" --context 2
 
 # Edit a document
 python scripts/edit_docx.py template.docx output.docx --replace "旧" "新"
+
+# Edit a specific paragraph
+python scripts/edit_docx.py in.docx out.docx --paragraph 3 "New paragraph text"
 
 # Convert LaTeX to OMML
 python scripts/latex2omml.py "x^2 + y^2 = z^2"
@@ -114,10 +126,11 @@ Schema: `format-spec/THEME-SCHEMA.md` defines all required and optional fields. 
 
 | Module | Purpose |
 |--------|---------|
-| `extract_docx.py` | Read .docx → Markdown |
-| `edit_docx.py` | CLI editing (replace, insert, delete, fill templates) |
+| `extract_docx.py` | Read .docx → Markdown (full, structure outline, range, section, grep search) |
+| `edit_docx.py` | CLI editing (replace, insert, delete, paragraph ops, range-scoped edits, fill templates) |
 | `apply_theme.py` | Parse theme → override Word styles → generate content |
 | `latex2omml.py` | LaTeX → MathML → OMML (robust formula embedding) |
+| `convert_to_doc.py` | Convert .docx to legacy .doc format |
 | `merge_runs.py` | XML-level run merging (fixes Word's split-run rendering) |
 
 ## 🔧 Compatibility
