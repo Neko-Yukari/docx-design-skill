@@ -50,9 +50,30 @@ $ python extract_docx.py thesis.docx --section "系统模型"
 [提取该节及所有子节的完整内容]
 ```
 
-支持模糊匹配：`--section "模型"` 匹配所有标题含"模型"的章节。
+支持模糊匹配：`--section "模型"` 匹配所有标题含"模型"的章节（子串匹配，大小写不敏感）。也支持精确匹配：`--section "第三章 系统模型" --exact`。
 
-### 4. `edit_docx.py --paragraph N "new text"`
+### 4. `extract_docx.py --grep "pattern"`
+
+**用途**：快速搜索全文，返回匹配段落索引 + 前后N段上下文。不提取全文，只返回命中的片段。
+
+```
+$ python extract_docx.py thesis.docx --grep "RFocus" --context 2
+
+[段落42] "...采用了RFocus技术中的majority voting算法..."
+  ← p40: "反向散射通信是物联网领域的..."
+  → p43: "该算法通过迭代优化实现..."
+  → p44: "仿真结果表明..."
+
+[段落78] "...RFocus系统由3000根天线..."
+  ← p76: "天线阵列的配置需要考虑..."
+  → p79: "每根天线的反射状态..."
+
+[段落156] "...与传统方案相比，RFocus的优势..."
+```
+
+**token消耗**：3个匹配位 + 上下文 = ~500 tokens（vs 全文30K+）。
+
+### 5. `edit_docx.py --paragraph N "new text"`
 
 **用途**：替换指定段落的内容（保留其格式风格）。
 
@@ -65,7 +86,7 @@ $ python edit_docx.py thesis.docx output.docx --paragraph 42 "新的段落内容
 - `--paragraph N --append "追加内容"` 在段落末尾追加
 - `--paragraph N --prepend "前缀内容"` 在段落开头插入
 
-### 5. `edit_docx.py --range N-M --replace "old" "new"`
+### 6. `edit_docx.py --range N-M --replace "old" "new"`
 
 **用途**：仅在指定段落范围内做替换。
 
@@ -103,7 +124,51 @@ Step 4: 验证
 | `--structure` 模式 | `extract_docx.py` | +30行 |
 | `--range N-M` 模式 | `extract_docx.py` | +15行 |
 | `--section "name"` 模式 | `extract_docx.py` | +25行 |
-| `--paragraph N` 定点编辑 | `edit_docx.py` | +30行 |
+| `--grep "pattern"` 搜索 | `extract_docx.py` | +20行 |
+| `--paragraph N` 定点编辑（含 `--file`/`--append`/`--prepend`） | `edit_docx.py` | +40行 |
 | `--range --replace` 范围替换 | `edit_docx.py` | +10行 |
 
-总计约110行，不改动现有逻辑。
+总计约140行，不改动现有逻辑。
+
+## QA 验证场景
+
+完成实现后，每个功能需通过以下验证：
+
+### `--structure`
+```
+$ python extract_docx.py thesis_sjtu_v2.docx --structure
+```
+**预期**：输出树形结构，每个 Heading 节点显示段落范围，根节点显示总段落数和表格数。无正文内容。
+
+### `--range`
+```
+$ python extract_docx.py thesis_sjtu_v2.docx --range 1-5
+```
+**预期**：仅输出段落1到5的内容。对无 style 的空段落，按 index 正常返回。
+
+### `--section`
+```
+$ python extract_docx.py thesis_sjtu_v2.docx --section "系统模型"
+```
+**预期**：匹配标题含"系统模型"的章节及所有子节（"1.1 系统模型"匹配）。`--section "不存在的标题"` 应报清晰错误。
+
+### `--grep`
+```
+$ python extract_docx.py thesis_sjtu_v2.docx --grep "天线" --context 1
+```
+**预期**：返回所有含"天线"的段落索引 + 前后各1段。不存在时输出"No matches"。
+
+### `--paragraph`
+```
+$ python edit_docx.py thesis_sjtu_v2.docx out.docx --paragraph 0 "新标题"
+```
+**预期**：段落0内容替换为"新标题"，其他段落不变，格式保持。`--paragraph 999` 应报段落不存在。
+$ python edit_docx.py thesis_sjtu_v2.docx out.docx --paragraph 3 --append "（补）"
+```
+**预期**：段落3末尾追加"（补）"。
+
+### `--range --replace`
+```
+$ python edit_docx.py thesis_sjtu_v2.docx out.docx --range 2-5 --replace "天线" "antenna"
+```
+**预期**：仅段落2-5中的"天线"被替换，段落1及其他保持不变。
