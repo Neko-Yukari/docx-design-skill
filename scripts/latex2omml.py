@@ -4,15 +4,16 @@ Convert LaTeX formulas to OMML for .docx embedding.
 Uses latex2mathml for robust LaTeX parsing, then converts MathML to OMML.
 
 Usage:
-    from latex2omml import latex_to_omml, insert_formula
+    from latex2omml import latex_to_omml, insert_formula, insert_formula_display
 
-    omml = latex_to_omml(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
-
-    from docx import Document
-    doc = Document()
+    # Inline formula (inside a run, for mixed text+math)
     p = doc.add_paragraph()
+    p.add_run('The formula: ')
     insert_formula(p, r"E = mc^2")
-    doc.save('output.docx')
+
+    # Display formula (block-level, centered equation)
+    p = doc.add_paragraph()
+    insert_formula_display(p, r"x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}")
 
 CLI: python latex2omml.py "E = mc^2"
 """
@@ -23,6 +24,7 @@ from latex2mathml import converter as _latex_converter
 OMML_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 MATHML_NS = 'http://www.w3.org/1998/Math/MathML'
 XML_NS = 'http://www.w3.org/XML/1998/namespace'
+W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
 
 def _tag(elem):
@@ -153,34 +155,70 @@ def _convert(ml_elem, omml_parent):
         for c in kids: _convert(c, omml_parent)
 
 
-def mathml_to_omml(mathml_root):
-    root = Element(f'{{{OMML_NS}}}oMathPara')
+def _mathml_to_omml_inner(mathml_root, root_elem):
+    """Shared conversion: fills root_elem with oMath children from MathML."""
     for child in list(mathml_root):
         t = _tag(child)
         if t in ('mrow', 'mstyle'):
-            om = SubElement(root, f'{{{OMML_NS}}}oMath')
+            om = SubElement(root_elem, f'{{{OMML_NS}}}oMath')
             _convert(child, om)
         elif t == 'semantics':
             for sc in child:
                 if _tag(sc) == 'mrow':
-                    om = SubElement(root, f'{{{OMML_NS}}}oMath')
+                    om = SubElement(root_elem, f'{{{OMML_NS}}}oMath')
                     _convert(sc, om)
                     break
-    return root
+    return root_elem
 
 
-def latex_to_omml(latex_str):
+def mathml_to_omml(mathml_root):
+    """Display equation: returns <m:oMathPara> element."""
+    return _mathml_to_omml_inner(mathml_root, Element(f'{{{OMML_NS}}}oMathPara'))
+
+
+def mathml_to_omml_inline(mathml_root):
+    """Inline equation: returns <m:oMath> element (no oMathPara wrapper).
+    
+    Inline OMML generates m:oMath directly. Per OOXML spec, m:oMathPara is ONLY for
+    block-level display equations and MUST be a direct child of w:p, never inside w:r.
+    """
+    return _mathml_to_omml_inner(mathml_root, Element(f'{{{OMML_NS}}}oMath'))
+
+
+def latex_to_omml(latex_str, inline=False):
     ml = _latex_converter.convert(latex_str)
     if 'xmlns' not in ml[:200]:
         ml = ml.replace('<math', f'<math xmlns="{MATHML_NS}"', 1)
-    return tostring(mathml_to_omml(fromstring(ml)), encoding='unicode')
+    converter = mathml_to_omml_inline if inline else mathml_to_omml
+    return tostring(converter(fromstring(ml)), encoding='unicode')
 
 
 def insert_formula(paragraph, latex_str):
+    """Insert an INLINE formula (mixed with text in the same paragraph).
+    
+    Generates <m:oMath> and appends to the last w:r in the paragraph.
+    This is correct for inline math: w:r > m:oMath
+    """
     from lxml import etree
-    run = paragraph.runs[0] if paragraph.runs else paragraph.add_run('')
-    run._element.append(etree.fromstring(latex_to_omml(latex_str)))
+    run = paragraph.runs[-1] if paragraph.runs else paragraph.add_run('')
+    omml_xml = latex_to_omml(latex_str, inline=True)
+    run._element.append(etree.fromstring(omml_xml))
     return run
+
+
+def insert_formula_display(paragraph, latex_str):
+    """Insert a DISPLAY (block-level) formula as a standalone equation.
+    
+    Generates <m:oMathPara> and inserts it directly into the paragraph (w:p),
+    NOT inside any w:r. Per OOXML spec: w:p > m:oMathPara > m:oMath
+    This is what Word uses for centered, block-level equations with Equation Tools.
+    """
+    from lxml import etree
+    p_elem = paragraph._p
+    omml_xml = latex_to_omml(latex_str, inline=False)
+    omp_elem = etree.fromstring(omml_xml)
+    p_elem.append(omp_elem)
+    return omp_elem
 
 
 if __name__ == '__main__':

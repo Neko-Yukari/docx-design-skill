@@ -519,20 +519,37 @@ page_number_align = center
 
 Convert LaTeX math expressions to OMML (Office Math Markup Language) for native .docx embedding — no MathType, no images, no copy-paste from Word's equation editor.
 
+### Formula Types — CRITICAL: Choose the right one
+
+| Type | Function | OOXML Structure | When to Use |
+|------|----------|-----------------|-------------|
+| **Display (块公式)** | `insert_formula_display(p, latex)` | `w:p > m:oMathPara > m:oMath` | Standalone centered equation, own paragraph |
+| **Inline (行内公式)** | `insert_formula(p, latex)` | `w:r > m:oMath` | Formula mixed with text in same paragraph |
+
+**Wrong pattern that breaks Equation Tools in Word:**
+```
+w:r > m:oMathPara > m:oMath    ← oMathPara inside w:r — Word won't show Equation Tools!
+```
+`m:oMathPara` MUST be a direct child of `w:p`, NEVER inside `w:r`. This is the #1 cause of formulas rendering but showing no formula options.
+
 ### Usage
 
 ```python
-from latex2omml import latex_to_omml, insert_formula
-
-# Get OMML XML string
-omml = latex_to_omml(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
-
-# Or insert directly into a paragraph
+from latex2omml import latex_to_omml, insert_formula, insert_formula_display
 from docx import Document
+
 doc = Document()
-p = doc.add_paragraph()
-p.add_run('The quadratic formula: ')
-insert_formula(p, r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
+
+# === Display (block) formula ===
+p1 = doc.add_paragraph()
+insert_formula_display(p1, r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
+
+# === Inline formula (mixed with text) ===
+p2 = doc.add_paragraph()
+p2.add_run('The quadratic formula is ')
+insert_formula(p2, r"x = \frac{-b}{2a}")  # inline: goes into last w:r
+p2.add_run(' which gives the roots.')
+
 doc.save('math.docx')
 ```
 
@@ -542,6 +559,14 @@ doc.save('math.docx')
 python latex2omml.py "E = mc^2"
 # Outputs OMML XML to stdout
 ```
+
+### WPS Office Compatibility
+
+WPS inserts equations with non-standard OOXML quirks that break in Word:
+- **`m:oMathPara` inside `w:r`** — WPS tolerates this, Word does not. Always use `insert_formula_display()` which puts `oMathPara` at `w:p` level.
+- **Redundant `m:ctrlPr` in `m:num`/`m:den`** — WPS adds these; they are technically valid per OOXML spec but unnecessary. `latex2omml.py` does NOT generate them.
+
+If a document was edited in WPS and formulas lost Equation Tools in Word, extract formulas, regenerate via `latex2omml.py`, and re-insert using `insert_formula_display()`.
 
 ### Supported LaTeX Constructs
 
@@ -639,27 +664,51 @@ Key XML files: `word/document.xml` (body), `word/comments.xml`, `word/media/` (i
 
 ### Math Formulas (OMML)
 
+**Display equation** (block-level): `w:p > m:oMathPara > m:oMath`
+
 ```xml
-<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
-  <m:oMath>
-    <m:f>                           <!-- fraction -->
-      <m:num><m:r><m:t>a</m:t></m:r></m:num>
-      <m:den><m:r><m:t>b</m:t></m:r></m:den>
-    </m:f>
-    <m:sSup>                        <!-- superscript -->
-      <m:e><m:r><m:t>x</m:t></m:r></m:e>
+<w:p>
+  <m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+    <m:oMath>
+      <m:f>                           <!-- fraction -->
+        <m:fPr/>
+        <m:num><m:r><m:t>a</m:t></m:r></m:num>
+        <m:den><m:r><m:t>b</m:t></m:r></m:den>
+      </m:f>
+      <m:sSup>                        <!-- superscript -->
+        <m:sSupPr/>
+        <m:e><m:r><m:t>x</m:t></m:r></m:e>
+        <m:sup><m:r><m:t>2</m:t></m:r></m:sup>
+      </m:sSup>
+    </m:oMath>
+  </m:oMathPara>
+</w:p>
+```
+
+**Inline equation**: `w:r > m:oMath` (note: NO `oMathPara` wrapper)
+
+```xml
+<w:p>
+  <w:r><w:t>The area is </w:t></w:r>
+  <m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+    <m:r><m:t>π</m:t></m:r>
+    <m:sSup>
+      <m:sSupPr/>
+      <m:e><m:r><m:t>r</m:t></m:r></m:e>
       <m:sup><m:r><m:t>2</m:t></m:r></m:sup>
     </m:sSup>
-    <m:rad>                         <!-- radical -->
-      <m:e><m:r><m:t>a+b</m:t></m:r></m:e>
-    </m:rad>
   </m:oMath>
-</m:oMathPara>
+</w:p>
 ```
 
 Element reference: `<m:f>`=fraction, `<m:sSup>`=superscript, `<m:sSub>`=subscript, `<m:rad>`=radical (√), `<m:nary>`=∑/∫/∏, `<m:r><m:t>`=text.
 
 Unicode: `\u00B1`=±, `\u2211`=∑, `\u222B`=∫, `\u221E`=∞, `\u03C0`=π.
+
+**Structural rules (from OOXML spec MS-OE376):**
+- `m:oMathPara` MUST be a direct child of `w:p` — never inside `w:r`. Violating this causes Word to not show Equation Tools.
+- `m:oMath` can be a direct child of `w:p` (inline) or inside `w:r` (inline) or inside `m:oMathPara` (display).
+- `m:ctrlPr` is valid inside `m:fPr`, `m:num`, `m:den`, and other property/argument elements. Its presence in `m:num`/`m:den` (common in WPS exports) is spec-legal but unnecessary for Word rendering.
 
 ---
 
