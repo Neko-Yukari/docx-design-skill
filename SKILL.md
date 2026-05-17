@@ -18,13 +18,18 @@ Read, create, edit Word documents on Windows using `python-docx`.
 
 ## Quick Reference
 
-| Task | Method | Section |
-|------|--------|---------|
-| **Create .docx (recommended)** | `python docx_tool.py create --output out.docx --title ...` | [Creating](#creating-docx) |
-| Read .docx text | `python extract_docx.py file.docx` | [Reading](#reading-docx) |
-| Read .doc text | Convert to .docx first, then read | [.doc Handling](#doc-handling) |
-| Edit .docx (simple) | `python edit_docx.py in.docx out.docx --replace "old" "new"` | [Editing](#editing-docx) |
-| Fill template form | `python edit_docx.py template.docx out.docx --fill map.json` | [Editing](#editing-docx) |
+**One tool does everything**: `python docx_tool.py <command> ...`
+
+| Task | CLI | Python API |
+|------|-----|------------|
+| **Create** new .docx | `docx_tool.py create --output out.docx --preset chinese ...` | `DocxBuilder().preset_chinese().add_heading(...).save(...)` |
+| **Read/Extract** .docx | `docx_tool.py extract file.docx --output file.md` | `DocxReader(file).extract_to_markdown(...)` |
+| **Search** in .docx | `docx_tool.py extract file.docx --grep "keyword"` | `DocxReader(file).grep(...)` |
+| **Edit** .docx | `docx_tool.py edit in.docx out.docx --replace "old" "new"` | `DocxEditor(in_file).replace(...).save(out_file)` |
+| **Merge runs** (fix split-run) | `docx_tool.py merge-runs in.docx out.docx` | `DocxUtil.merge_runs(in_file, out_file)` |
+| **Convert** .docx → .doc | `docx_tool.py convert-to-doc in.docx out.doc` | `DocxUtil.convert_to_doc(in_file, out_file)` |
+| **Apply theme** | `docx_tool.py apply-theme in.docx theme.yaml out.docx` | `DocxUtil.apply_theme(in_file, theme, out_file)` |
+| Read .doc text | Convert to .docx first, then extract | [.doc Handling](#doc-handling) |
 | Track changes | Unpack ZIP → edit XML → repack | [OOXML Reference](#ooxml-reference) |
 
 **Script paths**: PowerShell does NOT expand `~`. Use full absolute path to bundled scripts, or copy them to working directory first.
@@ -89,30 +94,73 @@ Use `docx_tool.py` for 90% of cases. Drop down to raw `python-docx` only when:
 
 ---
 
-## Reading .docx
+## Unified Workflow (docx_tool.py)
+
+All operations go through `docx_tool.py`. No more writing one-off `.py` scripts.
+
+### Create
 
 ```powershell
-# Full path:
-python C:\Users\81004\.config\opencode\skills\docx\scripts\extract_docx.py report.docx
+# CLI
+python docx_tool.py create --output report.docx --preset chinese --title "报告" --add-heading "1:概述" --add-paragraph "正文" --add-formula "x = \frac{1}{2}"
 
-# Or copy first:
-copy C:\Users\81004\.config\opencode\skills\docx\scripts\extract_docx.py .
-python extract_docx.py report.docx
+# Python API
+from docx_tool import DocxBuilder
+DocxBuilder().preset_chinese().add_heading("报告", level=1).add_paragraph("正文").save("report.docx")
 ```
 
-Outputs `report_extracted.md` with headings and tables preserved.
+### Read / Extract
 
-For custom processing, write a .py script:
+```powershell
+# Full extraction to Markdown
+python docx_tool.py extract report.docx --output report.md
 
-```python
-from docx import Document
+# Document structure (heading tree)
+python docx_tool.py extract report.docx --structure
 
-doc = Document('file.docx')
-for para in doc.paragraphs:
-    print(para.text)        # full text of each paragraph
-for table in doc.tables:
-    for row in table.rows:
-        print(' | '.join(cell.text for cell in row.cells))
+# Grep search with context
+python docx_tool.py extract report.docx --grep "关键词" --context 2
+
+# Extract paragraph range
+python docx_tool.py extract report.docx --range 10-25 --output section.md
+
+# Extract by section heading
+python docx_tool.py extract report.docx --section "Results" --output results.md
+```
+
+### Edit
+
+```powershell
+# Replace text
+python docx_tool.py edit in.docx out.docx --replace "old" "new"
+
+# Insert paragraph after index N
+python docx_tool.py edit in.docx out.docx --insert-after 3 "新段落"
+
+# Delete paragraph
+python docx_tool.py edit in.docx out.docx --delete 5
+
+# Set paragraph style
+python docx_tool.py edit in.docx out.docx --set-style 2 "Heading 1"
+
+# Replace entire paragraph
+python docx_tool.py edit in.docx out.docx --paragraph 2 "新内容"
+
+# Fill template from JSON
+python docx_tool.py edit template.docx out.docx --fill replacements.json
+```
+
+### Utils
+
+```powershell
+# Merge adjacent runs (fix split-run bug)
+python docx_tool.py merge-runs in.docx out.docx
+
+# Convert .docx → .doc
+python docx_tool.py convert-to-doc in.docx out.doc
+
+# Apply format theme
+python docx_tool.py apply-theme in.docx theme.yaml out.docx
 ```
 
 ---
@@ -208,96 +256,23 @@ After each significant edit: render → inspect at 100% zoom → fix any layout 
 
 ---
 
-## Editing .docx
+## Advanced: Raw python-docx (Reference Only)
 
-**Workflow**: Use bundled `edit_docx.py` for simple edits, write a script for complex ones.
+For cases where `docx_tool.py` presets are insufficient. Use `DocxBuilder` / `DocxEditor` first; drop down to raw `python-docx` only for:
+- Fine-grained run-level formatting (per-character fonts/colors)
+- Custom styles beyond Heading 1-3 + Normal
+- Direct OOXML manipulation (tracked changes, comments, etc.)
 
-### Prepare First: Eliminate Split-Run Problems at XML Level
+**Formula insertion rules (non-negotiable):**
 
-The #1 editing bug is text split across multiple `<w:r>` elements. Instead of working around it in Python, fix it at the source:
+| Rule | Correct | Wrong |
+|------|---------|-------|
+| Format | **OMML XML** (`m:oMath`, `m:oMathPara`) | Images, screenshots, MathType objects, plain text |
+| Display formula parent | `w:p > m:oMathPara > m:oMath` | `w:r > m:oMathPara > m:oMath` |
+| Inline formula parent | `w:r > m:oMath` | `w:r > m:oMathPara` |
+| Insert method | `paragraph._element.append(omml)` for display | `run._element.append(omml)` for display formulas |
 
-```powershell
-# Unpack + merge adjacent runs with identical formatting
-python merge_runs.py input.docx unpacked/
-
-# Now edit word/document.xml in the unpacked directory
-# Then repack (the bundled edit_docx.py does this automatically)
-```
-
-This is the Anthropic approach — by merging runs before editing, text replacement becomes reliable without any special Python workaround.
-
-### Fast Path (CLI)
-
-```powershell
-python edit_docx.py in.docx out.docx --replace "旧文本" "新文本"
-python edit_docx.py in.docx out.docx --list                        # list all paragraphs
-python edit_docx.py in.docx out.docx --insert-after 3 "新段落"
-python edit_docx.py in.docx out.docx --delete 5
-python edit_docx.py template.docx done.docx --fill replacements.json
-# replacements.json: {"姓名：": "姓名：张三", "学号：": "学号：2024001"}
-```
-
-### Script Path (Custom Logic)
-
-**The #1 pitfall**: Word splits text across multiple XML runs. "你好世界" can be Run1="你好", Run2="世界". Naive per-run replace misses it. Always use this pattern:
-
-```python
-# Robust replace — always use this function, never iterate runs directly
-def replace_in_para(para, old, new):
-    if old not in para.text:
-        return False
-    for run in para.runs:
-        if old in run.text:
-            run.text = run.text.replace(old, new)
-            return True
-    # Text spans multiple runs — consolidate
-    para.runs[0].text = para.text.replace(old, new)
-    for run in para.runs[1:]:
-        run._element.getparent().remove(run._element)
-    return True
-
-# Usage
-doc = Document('template.docx')
-for para in doc.paragraphs:
-    replace_in_para(para, '姓名：', '姓名：张三')
-# Also search tables and headers/footers
-for table in doc.tables:
-    for row in table.rows:
-        for cell in row.cells:
-            for para in cell.paragraphs:
-                replace_in_para(para, '姓名：', '姓名：张三')
-doc.save('filled.docx')
-```
-
-**Insert at position**:
-```python
-# AFTER paragraph 3
-target = doc.paragraphs[3]
-new_para = doc.add_paragraph('New text')
-target._element.addnext(new_para._element)
-
-# BEFORE paragraph 3
-target = doc.paragraphs[3]
-heading = doc.add_heading('New Section', level=2)
-target._element.addprevious(heading._element)
-
-# Delete paragraph 4
-doc.paragraphs[4]._element.getparent().remove(doc.paragraphs[4]._element)
-```
-
-**Replace image** (only via OOXML — `python-docx` can't do this):
-```python
-import zipfile, shutil, os
-def replace_image(docx_path, out_path, old_media_name, new_image_path):
-    tmp = '_tmp'
-    os.makedirs(tmp, exist_ok=True)
-    with zipfile.ZipFile(docx_path) as z: z.extractall(tmp)
-    shutil.copy2(new_image_path, os.path.join(tmp, 'word', 'media', old_media_name))
-    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as z:
-        for r,d,f in os.walk(tmp):
-            for fn in f: z.write(os.path.join(r,fn), os.path.relpath(os.path.join(r,fn),tmp))
-    shutil.rmtree(tmp)
-```
+**Only OMML produces the "Equation Tools" tab in Word.** Images render visually but are not editable equations. Plain text with Unicode math characters is not a formula. If a formula must be inserted, it MUST be OMML — no exceptions.
 
 ---
 
@@ -516,9 +491,5 @@ Professional document delivery standards (adapted from OpenAI's doc skill):
 - **python-docx** cannot read: tracked changes, comments, text boxes, equations, SmartArt, charts
 - **.doc** must be converted to .docx before reading
 - For tracked changes / comments: use the OOXML workflow (unpack ZIP → edit XML → repack)
-- **Bundled scripts** (in `~/.config/opencode/skills/docx/scripts/`):
-  - `docx_tool.py` — **Recommended**: fluent document builder with Chinese/English presets, automatic OMML formula insertion, and theme-font cleanup
-  - `extract_docx.py` — read .docx → Markdown
-  - `edit_docx.py` — CLI editing (replace, insert, delete, fill)
-  - `merge_runs.py` — unpack + merge adjacent runs (fix split-run at XML level)
-  - `latex2omml.py` — LaTeX → OMML formula conversion (used by docx_tool.py)
+- **Unified tool** (in `~/.config/opencode/skills/docx/scripts/`):
+  - `docx_tool.py` — **One tool for everything**: create, read, edit, merge-runs, convert, apply-theme. Self-contained, no one-off scripts needed.
