@@ -20,14 +20,72 @@ Read, create, edit Word documents on Windows using `python-docx`.
 
 | Task | Method | Section |
 |------|--------|---------|
-| Read .docx text | `python ~/.config/opencode/skills/docx/scripts/extract_docx.py file.docx` | [Reading](#reading-docx) |
+| **Create .docx (recommended)** | `python docx_tool.py create --output out.docx --title ...` | [Creating](#creating-docx) |
+| Read .docx text | `python extract_docx.py file.docx` | [Reading](#reading-docx) |
 | Read .doc text | Convert to .docx first, then read | [.doc Handling](#doc-handling) |
-| Create new .docx | Write a .py script with `python-docx` | [Creating](#creating-docx) |
 | Edit .docx (simple) | `python edit_docx.py in.docx out.docx --replace "old" "new"` | [Editing](#editing-docx) |
 | Fill template form | `python edit_docx.py template.docx out.docx --fill map.json` | [Editing](#editing-docx) |
 | Track changes | Unpack ZIP → edit XML → repack | [OOXML Reference](#ooxml-reference) |
 
 **Script paths**: PowerShell does NOT expand `~`. Use full absolute path to bundled scripts, or copy them to working directory first.
+
+---
+
+## Recommended Workflow (docx_tool.py)
+
+Instead of writing a one-off `generate_report.py` every time, use the bundled **`docx_tool.py`** — a reusable builder with presets for Chinese/English typography, automatic OMML formula insertion, and theme-font cleanup.
+
+### CLI — one-liner document creation
+
+```powershell
+python "C:\Users\81004\.config\opencode\skills\docx\scripts\docx_tool.py" create `
+  --output report.docx `
+  --preset chinese `
+  --title "项目报告" `
+  --add-heading "1:项目概述" `
+  --add-heading "2:技术方案" `
+  --add-paragraph "本文使用黑体作为正文字体。" `
+  --add-formula "x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}"
+```
+
+What `--preset chinese` does automatically:
+- Normal → SimHei (黑体), 10.5pt, black
+- Heading 1/2/3 → SimSun (宋体), bold, black
+- Removes `eastAsiaTheme` / `asciiTheme` theme references
+- Sets explicit `w:color w:val="000000"` on all styles
+
+### Python API — fluent builder
+
+```python
+import sys
+sys.path.insert(0, r"C:\Users\81004\.config\opencode\skills\docx\scripts")
+from docx_tool import DocumentBuilder
+
+# One-liner preset + chain build
+DocumentBuilder() \
+    .preset_chinese() \
+    .add_heading("项目报告", level=1) \
+    .add_heading("1. 概述", level=2) \
+    .add_paragraph("使用黑体作为正文字体。") \
+    .add_formula(r"x = \frac{1}{2}", display=True) \
+    .add_paragraph("行内公式示例：") \
+    .add_formula(r"E = mc^2", display=False) \
+    .save("report.docx")
+```
+
+**Key difference from raw `python-docx`:**
+- No manual `eastAsia` font XML manipulation
+- No theme reference cleanup
+- No OMML structure foot-guns (`add_formula()` automatically inserts at `w:p` level for display, `w:r` level for inline)
+- Preset defaults eliminate repetitive setup
+
+### When to use raw `python-docx`
+
+Use `docx_tool.py` for 90% of cases. Drop down to raw `python-docx` only when:
+- You need fine-grained run-level formatting (per-character fonts/colors)
+- You need custom styles beyond Heading 1-3 + Normal
+- You need to manipulate OOXML directly (tracked changes, comments, etc.)
+- You need to read/edit existing documents (use `extract_docx.py` / `edit_docx.py` instead)
 
 ---
 
@@ -59,9 +117,9 @@ for table in doc.tables:
 
 ---
 
-## Creating .docx
+## Advanced: Raw python-docx
 
-**Workflow**: Write a .py script → `python script.py`. Core building blocks:
+For cases where `docx_tool.py` presets are insufficient. **Workflow**: Write a .py script → `python script.py`.
 
 ```python
 from docx import Document
@@ -459,6 +517,8 @@ Professional document delivery standards (adapted from OpenAI's doc skill):
 - **.doc** must be converted to .docx before reading
 - For tracked changes / comments: use the OOXML workflow (unpack ZIP → edit XML → repack)
 - **Bundled scripts** (in `~/.config/opencode/skills/docx/scripts/`):
+  - `docx_tool.py` — **Recommended**: fluent document builder with Chinese/English presets, automatic OMML formula insertion, and theme-font cleanup
   - `extract_docx.py` — read .docx → Markdown
   - `edit_docx.py` — CLI editing (replace, insert, delete, fill)
   - `merge_runs.py` — unpack + merge adjacent runs (fix split-run at XML level)
+  - `latex2omml.py` — LaTeX → OMML formula conversion (used by docx_tool.py)
