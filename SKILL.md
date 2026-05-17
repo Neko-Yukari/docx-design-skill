@@ -110,16 +110,28 @@ def set_chinese_font(run, font_name):
 run2 = p.add_run(' 中文宋体 ')
 set_chinese_font(run2, 'SimSun')
 
-# Math formula (OMML injection)
+# Math formula (OMML injection) — MUST use native OMML, NEVER images or plain text
+# CRITICAL: oMathPara MUST be inserted at paragraph level (w:p), NOT inside w:r
 omml = '''<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
   <m:oMath><m:r><m:t>E</m:t></m:r><m:r><m:t>=</m:t></m:r>
   <m:r><m:t>m</m:t></m:r><m:r><m:t>c</m:t></m:r>
   <m:sSup><m:e/><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>
 </m:oMath></m:oMathPara>'''
-run = p.add_run('')
-run._element.append(etree.fromstring(omml))
+p._element.append(etree.fromstring(omml))  # ← insert into paragraph, NOT run
 
 doc.save('output.docx')
+```
+
+**Formula insertion rules (non-negotiable):**
+
+| Rule | Correct | Wrong |
+|------|---------|-------|
+| Format | **OMML XML** (`m:oMath`, `m:oMathPara`) | Images, screenshots, MathType objects, plain text |
+| Display formula parent | `w:p > m:oMathPara > m:oMath` | `w:r > m:oMathPara > m:oMath` |
+| Inline formula parent | `w:r > m:oMath` | `w:r > m:oMathPara` |
+| Insert method | `paragraph._element.append(omml)` for display | `run._element.append(omml)` for display formulas |
+
+**Only OMML produces the "Equation Tools" tab in Word.** Images render visually but are not editable equations. Plain text with Unicode math characters is not a formula. If a formula must be inserted, it MUST be OMML — no exceptions.
 ```
 
 ### Visual Verification (Render → Inspect → Fix)
@@ -292,27 +304,60 @@ Key XML files: `word/document.xml` (body), `word/comments.xml`, `word/media/` (i
 
 ### Math Formulas (OMML)
 
+**OMML is the ONLY acceptable format for formulas.** Images, plain text, MathType objects, or Unicode math characters are NOT formulas — they render but Word does not show Equation Tools and they are not editable.
+
+**Display equation** (block-level): `w:p > m:oMathPara > m:oMath`
+
 ```xml
-<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
-  <m:oMath>
-    <m:f>                           <!-- fraction -->
-      <m:num><m:r><m:t>a</m:t></m:r></m:num>
-      <m:den><m:r><m:t>b</m:t></m:r></m:den>
-    </m:f>
-    <m:sSup>                        <!-- superscript -->
-      <m:e><m:r><m:t>x</m:t></m:r></m:e>
+<w:p>
+  <m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+    <m:oMath>
+      <m:f>                           <!-- fraction -->
+        <m:fPr/>
+        <m:num><m:r><m:t>a</m:t></m:r></m:num>
+        <m:den><m:r><m:t>b</m:t></m:r></m:den>
+      </m:f>
+      <m:sSup>                        <!-- superscript -->
+        <m:sSupPr/>
+        <m:e><m:r><m:t>x</m:t></m:r></m:e>
+        <m:sup><m:r><m:t>2</m:t></m:r></m:sup>
+      </m:sSup>
+    </m:oMath>
+  </m:oMathPara>
+</w:p>
+```
+
+**Inline equation**: `w:r > m:oMath` (note: NO `oMathPara` wrapper)
+
+```xml
+<w:p>
+  <w:r><w:t>The area is </w:t></w:r>
+  <m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+    <m:r><m:t>π</m:t></m:r>
+    <m:sSup>
+      <m:sSupPr/>
+      <m:e><m:r><m:t>r</m:t></m:r></m:e>
       <m:sup><m:r><m:t>2</m:t></m:r></m:sup>
     </m:sSup>
-    <m:rad>                         <!-- radical -->
-      <m:e><m:r><m:t>a+b</m:t></m:r></m:e>
-    </m:rad>
   </m:oMath>
-</m:oMathPara>
+</w:p>
 ```
 
 Element reference: `<m:f>`=fraction, `<m:sSup>`=superscript, `<m:sSub>`=subscript, `<m:rad>`=radical (√), `<m:nary>`=∑/∫/∏, `<m:r><m:t>`=text.
 
 Unicode: `\u00B1`=±, `\u2211`=∑, `\u222B`=∫, `\u221E`=∞, `\u03C0`=π.
+
+**Structural rules (from OOXML spec MS-OE376):**
+- `m:oMathPara` MUST be a direct child of `w:p` — never inside `w:r`. Violating this causes Word to not show Equation Tools.
+- `m:oMath` can be a direct child of `w:p` (inline) or inside `w:r` (inline) or inside `m:oMathPara` (display).
+- `m:ctrlPr` is valid inside `m:fPr`, `m:num`, `m:den`, and other property/argument elements. Its presence in `m:num`/`m:den` (common in WPS exports) is spec-legal but unnecessary for Word rendering.
+
+**Prohibited formats (will NOT produce editable formulas):**
+- Images (.png, .jpg, .svg) of equations
+- MathType embedded objects
+- Plain text with Unicode math symbols (e.g., `∑`, `∫`, `²`) without OMML wrapper
+- LaTeX source code rendered as text
+- OLE objects or any non-OMML embedding
 
 ---
 
