@@ -623,7 +623,11 @@ class DocxBuilder:
                 del rFonts.attrib[attr]
 
     def _set_style_color(self, style, hex_color="000000"):
-        """Set font color on a style (hex without #)."""
+        """Set font color on a style (hex without #).
+        
+        Also removes w:themeColor so Word uses the explicit color instead of theme color.
+        Word prioritizes themeColor over val — if themeColor is present, the heading stays blue.
+        """
         rPr = style.element.find(f"{{{_W_NS}}}rPr")
         if rPr is None:
             rPr = etree.SubElement(style.element, f"{{{_W_NS}}}rPr")
@@ -631,6 +635,10 @@ class DocxBuilder:
         if color is None:
             color = etree.SubElement(rPr, f"{{{_W_NS}}}color")
         color.set(f"{{{_W_NS}}}val", hex_color)
+        # CRITICAL: Remove themeColor so Word doesn't override with blue accent color
+        for attr in [f"{{{_W_NS}}}themeColor", f"{{{_W_NS}}}themeTint", f"{{{_W_NS}}}themeShade"]:
+            if attr in color.attrib:
+                del color.attrib[attr]
 
     def _set_style_east_asian_font(self, style, ea_font, latin_font="Times New Roman"):
         """Set East Asian and Latin fonts on a style."""
