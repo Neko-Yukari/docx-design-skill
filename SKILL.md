@@ -12,7 +12,7 @@ Read, create, edit Word documents on Windows using `python-docx`.
 
 ## Critical Rule (Windows)
 
-**NEVER run Python inline in PowerShell.** Powershell chokes on f-strings, Chinese chars, and nested quotes. Always: write `.py` file → `python script.py`.
+**NEVER run Python inline in PowerShell.** Powershell chokes on f-strings, Chinese chars, and nested quotes. Always: use `docx_tool.py` CLI commands, or write a standalone `.py` file that imports from `docx_tool.py`.
 
 ---
 
@@ -165,56 +165,70 @@ python docx_tool.py apply-theme in.docx theme.yaml out.docx
 
 ---
 
-## Advanced: Raw python-docx
+## Advanced: Python API (DocxBuilder / DocxEditor / DocxReader / DocxUtil)
 
-For cases where `docx_tool.py` presets are insufficient. **Workflow**: Write a .py script → `python script.py`.
+For cases where `docx_tool.py` CLI presets are insufficient. Import classes directly — no boilerplate scripts needed.
+
+### DocxBuilder — create documents
 
 ```python
-from docx import Document
-from docx.shared import Cm, Pt, Inches, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml.ns import qn
-from lxml import etree
+from docx_tool import DocxBuilder
+from docx.shared import Inches
 
-doc = Document()
+# Custom preset beyond built-in chinese/english
+builder = DocxBuilder()
+builder.doc.styles['Normal'].font.size = Pt(11)
+builder.add_heading('Custom Report', level=1)
+builder.add_paragraph('Body text with custom formatting.')
+builder.add_table(rows=3, cols=2, data=[['A', 'B'], ['1', '2'], ['3', '4']])
+builder.add_image('chart.png', width=Inches(4))
+builder.save('output.docx')
+```
 
-# Page setup (A4)
-section = doc.sections[0]
-section.page_width  = Cm(21)
-section.page_height = Cm(29.7)
-section.left_margin = Cm(2.5)
-section.right_margin = Cm(2.5)
+### DocxEditor — edit existing documents
 
-# Heading
-h = doc.add_heading('Title', level=1)
+```python
+from docx_tool import DocxEditor
 
-# Paragraph with formatting
-p = doc.add_paragraph()
-run = p.add_run('Bold text. ')
-run.bold = True
-run.font.size = Pt(12)
-run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
-p.add_run('Normal text.')
+editor = DocxEditor('input.docx')
+editor.replace('old_text', 'new_text')           # global replace
+editor.insert_after(5, 'Inserted paragraph.')    # insert after paragraph 5
+editor.delete(3)                                 # delete paragraph 3
+editor.set_style(2, 'Heading 2')                 # change style
+editor.save('output.docx')
+```
 
-# Table
-t = doc.add_table(rows=2, cols=2, style='Light Grid Accent 1')
-t.rows[0].cells[0].text = 'Header 1'
-t.rows[0].cells[1].text = 'Header 2'
+### DocxReader — extract and search
 
-# Image
-doc.add_picture(r'C:\path\to\image.jpg', width=Cm(10))
+```python
+from docx_tool import DocxReader
 
-# Chinese font (must set eastAsia separately!)
-def set_chinese_font(run, font_name):
-    run.font.name = font_name
-    rPr = run._element.get_or_add_rPr()
-    rFonts = rPr.find(qn('w:rFonts'))
-    if rFonts is None:
-        rFonts = etree.SubElement(rPr, qn('w:rFonts'))
-    rFonts.set(qn('w:eastAsia'), font_name)
+reader = DocxReader('report.docx')
+reader.extract_to_markdown('report.md')          # full extraction
+reader.print_structure()                          # heading tree
+matches = reader.grep('keyword', context=2)       # search with context
+reader.extract_range(10, 25, 'section.md')       # paragraph range
+reader.extract_section('Results', 'results.md')  # by heading name
+```
 
-run2 = p.add_run(' 中文宋体 ')
-set_chinese_font(run2, 'SimSun')
+### DocxUtil — utilities
+
+```python
+from docx_tool import DocxUtil
+
+# Fix split-run bug
+DocxUtil.merge_runs('input.docx', 'output.docx')
+
+# Convert .docx → .doc
+DocxUtil.convert_to_doc('input.docx', 'output.doc')
+
+# Apply theme
+DocxUtil.apply_theme('input.docx', 'theme.yaml', 'output.docx')
+```
+
+### Raw python-docx (reference only)
+
+If you need features beyond `docx_tool.py` (tracked changes, comments, direct OOXML manipulation), use `python-docx` directly. See the [OOXML Reference](#ooxml-reference) section.
 
 # Math formula (OMML injection) — MUST use native OMML, NEVER images or plain text
 # CRITICAL: oMathPara MUST be inserted at paragraph level (w:p), NOT inside w:r
