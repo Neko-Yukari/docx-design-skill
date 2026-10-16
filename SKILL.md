@@ -1,6 +1,6 @@
 ---
 name: docx
-description: Read, create, and edit Word documents (.docx and .doc) on any platform. Supports LaTeX formulas, Chinese typesetting, modular themes, and Word style integration. Use when working with .docx/.doc files — reading, creating, editing, filling templates, generating thesis papers, or converting LaTeX to Word equations.
+description: Read, create, and edit Word documents (.docx and .doc) using dependencies installed in the selected Python environment. Supports LaTeX formulas, Chinese typesetting, modular themes, and Word style integration. Use when working with .docx/.doc files — reading, creating, editing, filling templates, generating thesis papers, or converting LaTeX to Word equations.
 license: MIT
 ---
 
@@ -12,7 +12,11 @@ Read, create, edit Word documents on Windows using `python-docx`.
 
 ## Critical Rule (Windows)
 
-**NEVER run Python inline in PowerShell.** Powershell chokes on f-strings, Chinese chars, and nested quotes. Always: use `docx_tool.py` CLI commands, or write a standalone `.py` file that imports from `docx_tool.py`.
+**Use CLI for simple tasks, short Python scripts for complex generation.**
+
+- **CLI**: quick edits, simple create (< 5 paragraphs), extract, search
+- **Python script**: complex documents with multiple sections, tables, images, formulas (keep scripts ≤ 40 lines, import from `docx_tool.py`)
+- **NEVER run Python inline in PowerShell** — f-strings, Chinese chars, and nested quotes break inline execution
 
 ---
 
@@ -22,6 +26,7 @@ Read, create, edit Word documents on Windows using `python-docx`.
 
 | Task | CLI | Python API |
 |------|-----|------------|
+| **Install dependencies** | `python -m pip install -r requirements.txt` | Use the same Python environment as the scripts |
 | **Create** new .docx | `docx_tool.py create --output out.docx --preset chinese ...` | `DocxBuilder().preset_chinese().add_heading(...).save(...)` |
 | **Read/Extract** .docx | `docx_tool.py extract file.docx --output file.md` | `DocxReader(file).extract_to_markdown(...)` |
 | **Search** in .docx | `docx_tool.py extract file.docx --grep "keyword"` | `DocxReader(file).grep(...)` |
@@ -29,6 +34,7 @@ Read, create, edit Word documents on Windows using `python-docx`.
 | **Merge runs** (fix split-run) | `docx_tool.py merge-runs in.docx out.docx` | `DocxUtil.merge_runs(in_file, out_file)` |
 | **Convert** .docx → .doc | `docx_tool.py convert-to-doc in.docx out.doc` | `DocxUtil.convert_to_doc(in_file, out_file)` |
 | **Apply theme** | `docx_tool.py apply-theme in.docx theme.yaml out.docx` | `DocxUtil.apply_theme(in_file, theme, out_file)` |
+| **Set fonts** (existing doc → 宋体/黑体) | `docx_tool.py set-fonts in.docx out.docx --body 宋体 --heading 黑体` | `DocxUtil.set_fonts(in_file, out_file, body_font="宋体", heading_font="黑体")` |
 | Read .doc text | Convert to .docx first, then extract | [.doc Handling](#doc-handling) |
 | Track changes | Unpack ZIP → edit XML → repack | [OOXML Reference](#ooxml-reference) |
 
@@ -58,45 +64,56 @@ What `--preset chinese` does automatically:
 - Heading 1/2/3 → SimSun (宋体), bold, black
 - Removes `eastAsiaTheme` / `asciiTheme` theme references
 - Sets explicit `w:color w:val="000000"` on all styles
+- **Auto heading numbering** — uses Word built-in multilevel list (1, 1.1, 1.1.1).
+  Call `add_heading("引言", level=1)` **without** the digit in the text.
+  Setting ``heading_numbering=False`` disables this.
 
-### Python API — fluent builder
+### Python API — for complex documents
+
+**Rule: CLI for simple edits, Python API for complex generation.**
+
+| Scenario | Method | Example |
+|----------|--------|---------|
+| **Quick edits** (replace, insert, delete, extract) | **CLI** | `python docx_tool.py edit ...` |
+| **Simple create** (< 5 paragraphs, no tables/images) | **CLI** | `python docx_tool.py create ...` |
+| **Complex documents** (multiple sections, tables, images, formulas, loops) | **Python API** | 20-40 line script importing `DocxBuilder` |
+
+**When using Python API, write SHORT scripts (≤ 40 lines)** that import from `docx_tool.py`. Do NOT reinvent formula insertion or style setup — use `DocxBuilder().preset_chinese()`.
 
 ```python
 import sys
 sys.path.insert(0, r"C:\Users\81004\.config\opencode\skills\docx\scripts")
-from docx_tool import DocumentBuilder
+from docx_tool import DocxBuilder
+from docx.shared import Inches
 
-# One-liner preset + chain build
-DocumentBuilder() \
-    .preset_chinese() \
-    .add_heading("项目报告", level=1) \
-    .add_heading("1. 概述", level=2) \
-    .add_paragraph("使用黑体作为正文字体。") \
-    .add_formula(r"x = \frac{1}{2}", display=True) \
-    .add_paragraph("行内公式示例：") \
-    .add_formula(r"E = mc^2", display=False) \
-    .save("report.docx")
+builder = DocxBuilder().preset_chinese()
+builder.add_heading("项目报告", level=1)
+builder.add_heading("概述", level=2)            # ← NO digit in text; Word auto-numbers
+builder.add_paragraph("本文使用黑体作为正文字体。")
+builder.add_formula(r"x = \frac{1}{2}", display=True)
+builder.add_table(rows=3, cols=2, data=[['A', 'B'], ['1', '2']])
+builder.add_image('chart.png', width=Inches(4))
+builder.save("report.docx")
 ```
+
+**Built-in heading numbering** (since 2026-06-22):
+- `preset_chinese()` now enables Word multilevel list by default:
+  - Level 1 → `1`、`2`、…  Level 2 → `1.1`、`1.2`、…  Level 3 → `1.1.1`、`1.1.2`、…
+- `add_heading()` text should **not** include the digit — Word inserts it.
+- To disable: `DocxBuilder().preset_chinese(heading_numbering=False)`.
+- To set manually: `builder.set_heading_numbering(levels=3)`.
 
 **Key difference from raw `python-docx`:**
 - No manual `eastAsia` font XML manipulation
 - No theme reference cleanup
-- No OMML structure foot-guns (`add_formula()` automatically inserts at `w:p` level for display, `w:r` level for inline)
+- No OMML structure foot-guns (`add_formula()` handles display vs inline automatically)
 - Preset defaults eliminate repetitive setup
-
-### When to use raw `python-docx`
-
-Use `docx_tool.py` for 90% of cases. Drop down to raw `python-docx` only when:
-- You need fine-grained run-level formatting (per-character fonts/colors)
-- You need custom styles beyond Heading 1-3 + Normal
-- You need to manipulate OOXML directly (tracked changes, comments, etc.)
-- You need to read/edit existing documents (use `extract_docx.py` / `edit_docx.py` instead)
 
 ---
 
 ## Unified Workflow (docx_tool.py)
 
-All operations go through `docx_tool.py`. No more writing one-off `.py` scripts.
+All operations go through `docx_tool.py`. **CLI for quick tasks, short scripts (≤ 40 lines) for complex documents.**
 
 ### Create
 
@@ -161,13 +178,60 @@ python docx_tool.py convert-to-doc in.docx out.doc
 
 # Apply format theme
 python docx_tool.py apply-theme in.docx theme.yaml out.docx
+
+# Retarget fonts on an existing document (Chinese thesis: 宋体 body + 黑体 headings)
+python docx_tool.py set-fonts in.docx out.docx --body 宋体 --heading 黑体
 ```
+
+### set-fonts vs apply-theme
+
+`apply-theme` builds a **thesis-shaped** document (cover / abstract / TOC / acknowledgements are mandatory sections), so it is the wrong tool when the document already has content and only its typography must change.
+
+Use **`set-fonts`** for that case. It rewrites `docDefaults` plus every style in `styles.xml` and `stylesWithEffects.xml`, matching heading styles by style-id/name (`Heading*`, `Title`, `Subtitle`) and treating everything else as body. It also:
+
+- removes `asciiTheme` / `eastAsiaTheme` / … — otherwise Word keeps resolving the theme font and silently ignores the explicit one;
+- rewrites run-level fonts in `document.xml` while keeping monospace runs (Consolas, Courier…) monospaced — pass `--styles-only` to leave runs untouched;
+- defaults to `--body 宋体 --heading 黑体 --body-latin "Times New Roman" --heading-latin "Times New Roman"`.
+
+```python
+from docx_tool import DocxUtil
+DocxUtil.set_fonts("in.docx", "out.docx", body_font="宋体", heading_font="黑体")
+```
+
+**Font name tip (Windows):** Chinese fonts are installed under localized family names, so `InstalledFontCollection` returns `宋体` / `黑体` rather than `SimSun` / `SimHei`. Both spellings resolve in Word; prefer the localized names when targeting a Chinese-locale machine. Word substitutes silently when a font is missing (e.g. `Noto Sans CJK SC`), which is what produces garbled or missing glyphs.
+
+### Prefer a curated template over cloning someone else's file
+
+Cloning a real document — load it with `python-docx`, delete every body element **except** `w:sectPr`, write new content with its styles — reproduces its typography exactly, but it also reproduces its **defects**. You then have to discover them after generating (clipped titles, bloated files) and patch the output. Only do this when you genuinely must match a third-party file.
+
+For your own deliverables, start from a curated template instead. `templates/chinese-report.docx` ships with this skill and already fixes the common defects:
+
+- body 宋体 + headings 黑体 + Times New Roman for Latin, set in `docDefaults` and every style, with theme-font references removed;
+- **all line spacing as a multiple** (`w:lineRule="auto"`), so a larger font never gets clipped;
+- page size, margins, heading sizes and table style defined once;
+- no embedded media, so outputs stay small.
+
+```python
+from docx import Document
+TEMPLATE = r"...\skills\docx\templates\chinese-report.docx"
+doc = Document(TEMPLATE)          # styles are already correct
+# ... keep w:sectPr, clear the body, write content ...
+doc.save("out.docx")              # no post-processing needed
+```
+
+Regenerate the template with `scripts/`-adjacent tooling only when you want to change the shared look; never hand-patch individual outputs.
+
+If you do have to clone, three things break:
+
+- **Never remove `w:sectPr`.** It must stay as the last body child: python-docx inserts new paragraphs/tables before it, and `Document.add_table` reads it for the text-column width. Removing it raises `IndexError` in `document.py:_block_width`.
+- **Unreferenced media is carried over.** Images embedded in the template stay in the package even if the new body never references them, so each output silently gains megabytes. Drop every `word/media/*` whose relationship id (`r:embed` / `r:link`) does not appear in `document.xml`, and remove those `<Relationship>` entries in `word/_rels/document.xml.rels`.
+- **Fixed line spacing clips anything taller than the line.** `w:lineRule="exact"` is not only an image hazard — inline pictures get cut to a sliver, and so does any larger text: a 22 pt title or a 15 pt heading under a 16 pt exact line loses its top half. Use multiple/auto spacing on headings so the value scales with the font size, and override spacing on image paragraphs (`w:line="240" w:lineRule="auto"`, plus `w:keepNext` and centered alignment).
 
 ---
 
-## Advanced: Python API (DocxBuilder / DocxEditor / DocxReader / DocxUtil)
+## Advanced: Python API (for complex documents only)
 
-For cases where `docx_tool.py` CLI presets are insufficient. Import classes directly — no boilerplate scripts needed.
+**For CLI-insufficient cases: multi-section documents, tables, images, formula loops. Keep scripts ≤ 40 lines.**
 
 ### DocxBuilder — create documents
 
@@ -184,6 +248,80 @@ builder.add_table(rows=3, cols=2, data=[['A', 'B'], ['1', '2'], ['3', '4']])
 builder.add_image('chart.png', width=Inches(4))
 builder.save('output.docx')
 ```
+
+#### set_heading_numbering(levels=3)
+
+Enables Word built-in multilevel list numbering for headings (1, 1.1, 1.1.1).
+`preset_chinese()` calls this by default.
+
+```python
+builder = DocxBuilder().preset_chinese(heading_numbering=True)  # default
+# or set manually:
+builder.set_heading_numbering(levels=3)
+
+# Now add_heading text should NOT include digits
+builder.add_heading("引言", level=1)      # → "1  引言"
+builder.add_heading("研究背景", level=2)   # → "1.1  研究背景"
+builder.add_heading("数据来源", level=2)   # → "1.2  数据来源"
+```
+
+Disable: `DocxBuilder().preset_chinese(heading_numbering=False)`.
+
+#### add_numbered_list(items, *, format="decimal", lvl_text=None, start=1, hanging=360, left_indent=720)
+
+Adds a Word auto-numbered (or bulleted) list. **Do NOT** type digits or bullet characters into the text — Word inserts them.
+
+Supports **flat lists** (all same level) and **multi-level lists** via `(text, level)` tuples.
+
+```python
+# Flat list with default "1." format
+builder.add_numbered_list([
+    "在人均消费维度，美国……",
+    "在用药质量维度，中国……",
+])
+
+# Chinese paren format: （1）（2）（3）
+builder.add_numbered_list([
+    "第一条结论",
+    "第二条结论",
+], format="decimalParen")
+
+# Multi-level: 1 → 1.1 → 1.1.1
+builder.add_numbered_list([
+    ("一级条目", 0),
+    ("  二级子条目", 1),
+    ("    三级子条目", 2),
+    ("一级条目", 0),
+], format="decimal")
+
+# Chinese counting: 一、二、三
+builder.add_numbered_list([
+    "引言部分", "方法部分", "结果部分",
+], format="chineseCounting")
+
+# Bullet list (convenience method)
+builder.add_bullet_list(["项目A", "项目B", "项目C"])
+```
+
+| `format` key         | numFmt             | lvlText            | Renders as          |
+| -------------------- | ------------------ | ------------------ | ------------------- |
+| `"decimal"`            | `decimal`            | `%1.`                | 1. 2. 3.            |
+| `"decimalParen"`       | `decimal`            | `（%1）`             | （1）（2）（3）      |
+| `"decimalParen2"`      | `decimal`            | `%1)`                | 1) 2) 3)            |
+| `"chineseCounting"`    | `chineseCounting`    | `一、`               | 一、二、三、        |
+| `"chineseParen"`       | `chineseCounting`    | `（%1）`             | （一）（二）（三）  |
+| `"bullet"`             | `bullet`             | `\u2022`             | • • •               |
+| `"upperRoman"`         | `upperRoman`         | `%1.`                | I. II. III.         |
+| `"upperLetter"`        | `upperLetter`        | `%1.`                | A. B. C.            |
+| `"lowerLetter"`        | `lowerLetter`        | `%1.`                | a. b. c.            |
+
+Pass a raw `numFmt` value (e.g. `"chineseLegalSimplified"`) to `format` for formats not in the table.
+Pass `lvl_text="第%1条"` to override the default template string.
+Multi-level lists auto-generate `%1.` / `%1.%2.` / `%1.%2.%3.` unless `lvl_text` is provided.
+
+#### add_bullet_list(items)
+
+Convenience: equivalent to `add_numbered_list(items, format="bullet")`.
 
 ### DocxEditor — edit existing documents
 
@@ -226,21 +364,9 @@ DocxUtil.convert_to_doc('input.docx', 'output.doc')
 DocxUtil.apply_theme('input.docx', 'theme.yaml', 'output.docx')
 ```
 
-### Raw python-docx (reference only)
+### Raw python-docx (DO NOT USE — reference only)
 
-If you need features beyond `docx_tool.py` (tracked changes, comments, direct OOXML manipulation), use `python-docx` directly. See the [OOXML Reference](#ooxml-reference) section.
-
-# Math formula (OMML injection) — MUST use native OMML, NEVER images or plain text
-# CRITICAL: oMathPara MUST be inserted at paragraph level (w:p), NOT inside w:r
-omml = '''<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
-  <m:oMath><m:r><m:t>E</m:t></m:r><m:r><m:t>=</m:t></m:r>
-  <m:r><m:t>m</m:t></m:r><m:r><m:t>c</m:t></m:r>
-  <m:sSup><m:e/><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>
-</m:oMath></m:oMathPara>'''
-p._element.append(etree.fromstring(omml))  # ← insert into paragraph, NOT run
-
-doc.save('output.docx')
-```
+**Agents: Never write raw python-docx code.** For features beyond `docx_tool.py` (tracked changes, comments), see [OOXML Reference](#ooxml-reference).
 
 **Formula insertion rules (non-negotiable):**
 
@@ -479,13 +605,22 @@ color.set(f'{{{W}}}val', '000000')  # black
 
 ### Dependencies
 
-| Package | Install | Purpose |
-|---------|---------|---------|
-| `python-docx` | `pip install python-docx` | Core: read, create, edit .docx |
-| `lxml` | comes with python-docx | XML parsing for OOXML/OMML |
-| `mammoth` | `pip install mammoth` | Alternative: .docx→Markdown |
-| `pywin32` | `pip install pywin32` | .doc→.docx via MS Word COM |
-| LibreOffice | `winget install LibreOffice.LibreOffice` | .doc→.docx, PDF export |
+Install dependencies in the Python environment that runs the scripts. Copied `site-packages/` directories and platform-specific launchers are not used.
+
+| Package | Location | Install once? | Purpose |
+|---------|----------|---------------|---------|
+| `python-docx` | Selected Python environment | Yes | Core: read, create, edit .docx |
+| `latex2mathml` | Selected Python environment | Yes | LaTeX → MathML conversion |
+| `lxml` | System Python | **Yes** (`pip install lxml`) | XML parsing for OOXML/OMML |
+| `mammoth` | System Python | Optional | Alternative: .docx→Markdown |
+| `pywin32` | System Python | Optional | .doc→.docx via MS Word COM |
+
+**One-time setup** (run from the skill directory):
+```bash
+python -m pip install -r requirements.txt
+```
+
+Run all scripts with this same Python interpreter. A virtual environment may be used; do not copy its installed packages into the skill.
 
 ---
 

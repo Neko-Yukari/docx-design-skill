@@ -4,58 +4,28 @@ docx_tool.py — Unified tool for creating, reading, editing, and converting .do
 
 This is a self-contained script.  No imports from other files are required.
 
-Python API::
-
-    from docx_tool import DocxBuilder, DocxReader, DocxEditor, DocxUtil
-
-    # Create
-    builder = DocxBuilder().preset_chinese().add_heading("标题").add_paragraph("正文").save("out.docx")
-
-    # Read
-    reader = DocxReader("report.docx")
-    reader.extract_to_markdown("report.md")
-    reader.print_structure()
-    reader.grep("关键词", context=2)
-    reader.extract_range(10, 25, "section.md")
-    reader.extract_section("Results", "results.md")
-
-    # Edit
-    editor = DocxEditor("in.docx")
-    editor.replace("old", "new")
-    editor.insert_after(3, "新段落")
-    editor.delete(5)
-    editor.set_style(2, "Heading 1")
-    editor.save("out.docx")
-
-    # Utils
-    DocxUtil.merge_runs("in.docx", "out.docx")
-    DocxUtil.convert_to_doc("in.docx", "out.doc")
-    DocxUtil.apply_theme("in.docx", "theme.yaml", "out.docx")
-
-CLI::
-
-    # Create
-    python docx_tool.py create --output out.docx --preset chinese --title "报告" --add-heading "1:概述"
-
-    # Read/Extract
-    python docx_tool.py extract report.docx --output report.md
-    python docx_tool.py extract report.docx --structure
-    python docx_tool.py extract report.docx --grep "关键词" --context 2
-    python docx_tool.py extract report.docx --range 10-25 --output section.md
-    python docx_tool.py extract report.docx --section "Results"
-
-    # Edit
-    python docx_tool.py edit in.docx out.docx --replace "old" "new"
-    python docx_tool.py edit in.docx out.docx --insert-after 3 "新段落"
-    python docx_tool.py edit in.docx out.docx --delete 5
-    python docx_tool.py edit in.docx out.docx --set-style 2 "Heading 1"
-
-    # Utils
-    python docx_tool.py merge-runs in.docx out.docx
-    python docx_tool.py convert-to-doc in.docx out.doc
-    python docx_tool.py apply-theme in.docx theme.yaml out.docx
+Install dependencies with ``python -m pip install -r requirements.txt``.
 """
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# ═══════════════════════════════════════════════════════════════
+# Use bundled site-packages (if present)
+# ═══════════════════════════════════════════════════════════════
+# Dependencies come from the selected Python environment, not copied packages.
+
+# Check for lxml (C extension, must be system-installed)
+try:
+    import lxml.etree
+except ImportError:
+    print("[docx_tool] ERROR: lxml is required but not installed.")
+    print("[docx_tool] Run once:  pip install lxml")
+    print("[docx_tool] Or:        pip install -r requirements.txt")
+    sys.exit(1)
+
+# ═══════════════════════════════════════════════════════════════
 
 import argparse
 import copy
@@ -252,10 +222,30 @@ def _omml_convert(ml_elem, omml_parent):
     elif tag == "mfenced":
         op = ml_elem.get("open", "(")
         cl = ml_elem.get("close", ")")
-        _omml_add_text_run(omml_parent, op)
-        for c in kids:
-            _omml_convert(c, omml_parent)
-        _omml_add_text_run(omml_parent, cl)
+        
+        # Use proper OMML delimiter elements for absolute value and norm
+        if op == "|" and cl == "|":
+            # Absolute value: |...|
+            d = SubElement(omml_parent, f"{{{_OMML_NS}}}d")
+            dpr = SubElement(d, f"{{{_OMML_NS}}}dPr")
+            SubElement(dpr, f"{{{_OMML_NS}}}chr").set(f"{{{_OMML_NS}}}val", "|")
+            de = SubElement(d, f"{{{_OMML_NS}}}e")
+            for c in kids:
+                _omml_convert(c, de)
+        elif op == "\u2016" and cl == "\u2016":
+            # Norm: ||...||
+            d = SubElement(omml_parent, f"{{{_OMML_NS}}}d")
+            dpr = SubElement(d, f"{{{_OMML_NS}}}dPr")
+            SubElement(dpr, f"{{{_OMML_NS}}}chr").set(f"{{{_OMML_NS}}}val", "\u2016")
+            de = SubElement(d, f"{{{_OMML_NS}}}e")
+            for c in kids:
+                _omml_convert(c, de)
+        else:
+            # Other delimiters: simple text approach
+            _omml_add_text_run(omml_parent, op)
+            for c in kids:
+                _omml_convert(c, omml_parent)
+            _omml_add_text_run(omml_parent, cl)
 
     elif tag == "none":
         pass
@@ -292,6 +282,212 @@ def _mathml_to_omml_inline(mathml_root):
     return _mathml_to_omml_inner(mathml_root, Element(f"{{{_OMML_NS}}}oMath"))
 
 
+def _fix_mathml(mathml_root):
+    """Fix common latex2mathml parsing issues:
+    1. \\int, \\sum, \\prod, \\oint rendered as text instead of operators
+    2. \\left, \\right text inserted before delimiters
+    3. \\frac rendered as text instead of fraction
+    4. | delimiters not paired properly
+    """
+    from xml.etree.ElementTree import SubElement
+
+    _NARY_OPS = {
+        ('i', 'n', 't'): '∫',      # integral
+        ('s', 'u', 'm'): '∑',      # summation
+        ('p', 'r', 'o', 'd'): '∏', # product
+        ('o', 'i', 'n', 't'): '∮', # contour integral
+    }
+
+    def _tag(elem):
+        return elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+
+    def _is_mi_text(elem, text):
+        return _tag(elem) == 'mi' and elem.text == text
+
+    def _remove_elements(parent, indices):
+        """Remove children at given indices (sorted descending)."""
+        children = list(parent)
+        for idx in sorted(indices, reverse=True):
+            if 0 <= idx < len(children):
+                parent.remove(children[idx])
+
+    def _process_nary_operators(parent):
+        """Convert text sequences like 'i','n','t' + msubsup to proper n-ary operators.
+        Also convert msubsup with n-ary operator base (e.g., <mo>∫</mo>) to munderover."""
+        from xml.etree.ElementTree import Element
+        children = list(parent)
+        i = 0
+        while i < len(children):
+            matched = False
+            # Case 1: Text sequences like 'i','n','t' followed by limits
+            for pattern, op_char in _NARY_OPS.items():
+                if i + len(pattern) > len(children):
+                    continue
+
+                if all(_is_mi_text(children[i + j], pattern[j]) for j in range(len(pattern))):
+                    next_idx = i + len(pattern)
+
+                    if next_idx < len(children) and _tag(children[next_idx]) in ('msubsup', 'msub', 'munderover'):
+                        limits_elem = children[next_idx]
+                        lim_kids = list(limits_elem)
+
+                        new_elem = Element(f'{{{_MATHML_NS}}}munderover')
+                        op_mo = SubElement(new_elem, f'{{{_MATHML_NS}}}mo')
+                        op_mo.text = op_char
+
+                        sub_row = SubElement(new_elem, f'{{{_MATHML_NS}}}mrow')
+                        if len(lim_kids) > 1:
+                            sub_row.append(lim_kids[1])
+
+                        sup_row = SubElement(new_elem, f'{{{_MATHML_NS}}}mrow')
+                        if len(lim_kids) > 2:
+                            sup_row.append(lim_kids[2])
+
+                        _remove_elements(parent, [next_idx] + list(range(i, i + len(pattern))))
+                        parent.insert(i, new_elem)
+                        matched = True
+                        break
+
+                    elif next_idx < len(children) and _tag(children[next_idx]) != 'msubsup':
+                        new_elem = Element(f'{{{_MATHML_NS}}}mo')
+                        new_elem.text = op_char
+                        _remove_elements(parent, list(range(i, i + len(pattern))))
+                        parent.insert(i, new_elem)
+                        matched = True
+                        break
+
+            if matched:
+                children = list(parent)
+                continue
+
+            # Case 2: msubsup/msub with n-ary operator as base (e.g., <msubsup><mo>∫</mo>...)
+            if _tag(children[i]) in ('msubsup', 'msub', 'msubsup'):
+                elem_kids = list(children[i])
+                if elem_kids:
+                    base = elem_kids[0]
+                    if _tag(base) == 'mo' and base.text in ('∫', '∑', '∏', '∮', '\u222B', '\u2211', '\u220F', '\u222E', '&#x222B;', '&#x2211;', '&#x220F;', '&#x222E;'):
+                        # Convert to munderover for proper OMML nary handling
+                        new_elem = Element(f'{{{_MATHML_NS}}}munderover')
+                        op_mo = SubElement(new_elem, f'{{{_MATHML_NS}}}mo')
+                        op_mo.text = base.text
+
+                        sub_row = SubElement(new_elem, f'{{{_MATHML_NS}}}mrow')
+                        if len(elem_kids) > 1:
+                            sub_row.append(elem_kids[1])
+
+                        sup_row = SubElement(new_elem, f'{{{_MATHML_NS}}}mrow')
+                        if len(elem_kids) > 2:
+                            sup_row.append(elem_kids[2])
+
+                        parent.remove(children[i])
+                        parent.insert(i, new_elem)
+                        matched = True
+
+            if matched:
+                children = list(parent)
+            else:
+                i += 1
+
+    def _process_text_prefixes(parent):
+        """Remove spurious 'left', 'right', 'frac' text inserted by latex2mathml."""
+        from xml.etree.ElementTree import Element
+        children = list(parent)
+        i = 0
+        while i < len(children):
+            # Pattern for 'frac' followed by two mrow elements (numerator and denominator)
+            if (i + 4 <= len(children) and
+                all(_is_mi_text(children[i + j], c) for j, c in enumerate('frac'))):
+                next_idx = i + 4
+                if (next_idx < len(children) and next_idx + 1 < len(children) and
+                    _tag(children[next_idx]) == 'mrow' and
+                    _tag(children[next_idx + 1]) == 'mrow'):
+
+                    # Create mfrac element using Element (not SubElement)
+                    frac = Element(f'{{{_MATHML_NS}}}mfrac')
+
+                    # Numerator: copy children from first mrow
+                    num = SubElement(frac, f'{{{_MATHML_NS}}}mrow')
+                    for c in list(children[next_idx]):
+                        num.append(c)
+
+                    # Denominator: copy children from second mrow
+                    den = SubElement(frac, f'{{{_MATHML_NS}}}mrow')
+                    for c in list(children[next_idx + 1]):
+                        den.append(c)
+
+                    # Replace elements
+                    _remove_elements(parent, [next_idx + 1, next_idx] + list(range(i, i + 4)))
+                    parent.insert(i, frac)
+                    children = list(parent)
+                    continue
+
+            # Pattern for 'left' (4 chars: l,e,f,t) - just remove
+            if (i + 4 <= len(children) and
+                all(_is_mi_text(children[i + j], c) for j, c in enumerate('left'))):
+                _remove_elements(parent, list(range(i, i + 4)))
+                children = list(parent)
+                continue
+
+            # Pattern for 'right' (5 chars: r,i,g,h,t) - just remove
+            if (i + 5 <= len(children) and
+                all(_is_mi_text(children[i + j], c) for j, c in enumerate('right'))):
+                _remove_elements(parent, list(range(i, i + 5)))
+                children = list(parent)
+                continue
+
+            i += 1
+
+    def _process_delimiters(parent):
+        """Convert paired | mo elements to mfenced structures."""
+        from xml.etree.ElementTree import Element
+        children = list(parent)
+        i = 0
+        while i < len(children):
+            if _tag(children[i]) == 'mo' and children[i].text in ('|', '\u0007C', '\u007C', '&#x0007C;'):
+                # Look for matching closing |
+                for j in range(i + 1, len(children)):
+                    if _tag(children[j]) == 'mo' and children[j].text in ('|', '\u0007C', '\u007C', '&#x0007C;'):
+                        # Found pair: wrap content between them in mfenced
+                        # Use Element (not SubElement) to avoid double-insertion
+                        fenced = Element(f'{{{_MATHML_NS}}}mfenced')
+                        fenced.set('open', '|')
+                        fenced.set('close', '|')
+
+                        # Move elements between the delimiters into mfenced
+                        inner = SubElement(fenced, f'{{{_MATHML_NS}}}mrow')
+                        for k in range(i + 1, j):
+                            inner.append(children[k])
+
+                        # Remove original elements (closing first, then opening)
+                        parent.remove(children[j])
+                        for k in range(j - 1, i, -1):
+                            parent.remove(children[k])
+                        parent.remove(children[i])
+
+                        # Insert mfenced at position i
+                        parent.insert(i, fenced)
+                        children = list(parent)
+                        break
+                else:
+                    i += 1
+                    continue
+            else:
+                i += 1
+
+    def _recurse(elem):
+        """Process element and all descendants."""
+        for child in list(elem):
+            _recurse(child)
+
+        if _tag(elem) in ('mrow', 'math', 'mstyle'):
+            _process_nary_operators(elem)
+            _process_text_prefixes(elem)
+            _process_delimiters(elem)
+
+    _recurse(mathml_root)
+    return mathml_root
+
+
 def latex_to_omml(latex_str, inline=False):
     """Convert a LaTeX string to OMML XML.
 
@@ -308,8 +504,10 @@ def latex_to_omml(latex_str, inline=False):
     if "xmlns" not in ml[:200]:
         ml = ml.replace("<math", f'<math xmlns="{_MATHML_NS}"', 1)
     from xml.etree.ElementTree import fromstring, tostring
+    mathml_root = fromstring(ml)
+    _fix_mathml(mathml_root)
     converter = _mathml_to_omml_inline if inline else _mathml_to_omml
-    return tostring(converter(fromstring(ml)), encoding="unicode")
+    return tostring(converter(mathml_root), encoding="unicode")
 
 
 def insert_formula(paragraph, latex_str):
@@ -662,12 +860,17 @@ class DocxBuilder:
         h2_size=14,
         h3_size=12,
         color="000000",
+        heading_numbering=True,
     ):
         """Apply Chinese document defaults.
 
         Sets Normal to ``body_font`` at ``body_size`` pt and headings 1–3 to
         ``heading_font`` with bold.  Removes theme font references and sets
         explicit black colour.
+
+        If ``heading_numbering`` is True (default), automatically adds
+        multilevel heading numbering (1, 1.1, 1.1.1) — call
+        ``add_heading("引言", level=1)`` *without* the number in the text.
         """
         style = self.doc.styles["Normal"]
         style.font.size = Pt(body_size)  # type: ignore[union-attr]
@@ -685,6 +888,86 @@ class DocxBuilder:
                 self._remove_theme_refs(s)
             except KeyError:
                 pass
+
+        if heading_numbering:
+            self.set_heading_numbering(levels=3)
+        return self
+
+    def set_heading_numbering(self, levels=3):
+        """Add automatic multilevel numbering to Heading 1–N.
+
+        After calling this, ``add_heading(text, level=1)`` will
+        automatically prefix the heading with the correct number
+        (e.g. ``"引言"`` → ``"1  引言"``).  No need to write the
+        digit in the text string.
+
+        Numbering format: 1, 1.1, 1.1.1 (decimal, left-aligned).
+        """
+        from lxml import etree as _etree
+
+        numbering_part = self.doc.part.numbering_part
+        numbering_elem = numbering_part.element
+
+        # avoid conflicts with existing numbering definitions
+        ns_w = f"{{{_W_NS}}}"
+        existing_abs = [int(e.get(f"{{{_W_NS}}}abstractNumId", "0"))
+                        for e in numbering_elem.findall(f"{ns_w}abstractNum")]
+        existing_nums = [int(e.get(f"{{{_W_NS}}}numId", "0"))
+                         for e in numbering_elem.findall(f"{ns_w}num")]
+        abs_id = str(max(existing_abs) + 1 if existing_abs else 0)
+        num_id = str(max(existing_nums) + 1 if existing_nums else 1)
+
+        # ── abstract numbering ──
+        abs_elem = _etree.SubElement(numbering_elem, qn("w:abstractNum"))
+        abs_elem.set(qn("w:abstractNumId"), abs_id)
+        mlt = _etree.SubElement(abs_elem, qn("w:multiLevelType"))
+        mlt.set(qn("w:val"), "hybridMultilevel")
+
+        for ilvl in range(levels):
+            lvl_elem = _etree.SubElement(abs_elem, qn("w:lvl"))
+            lvl_elem.set(qn("w:ilvl"), str(ilvl))
+            lvl_elem.set(qn("w:tentative"), "0")
+
+            start = _etree.SubElement(lvl_elem, qn("w:start"))
+            start.set(qn("w:val"), "1")
+
+            nf = _etree.SubElement(lvl_elem, qn("w:numFmt"))
+            nf.set(qn("w:val"), "decimal")
+
+            lt = _etree.SubElement(lvl_elem, qn("w:lvlText"))
+            parts = ".".join(f"%{i+1}" for i in range(ilvl + 1))
+            lt.set(qn("w:val"), parts)
+
+            jc = _etree.SubElement(lvl_elem, qn("w:lvlJc"))
+            jc.set(qn("w:val"), "left")
+
+            pPr = _etree.SubElement(lvl_elem, qn("w:pPr"))
+            ind = _etree.SubElement(pPr, qn("w:ind"))
+            ind.set(qn("w:left"), "420")
+            ind.set(qn("w:hanging"), "420")
+
+        # ── num instance ──
+        num_elem = _etree.SubElement(numbering_elem, qn("w:num"))
+        num_elem.set(qn("w:numId"), num_id)
+        ar = _etree.SubElement(num_elem, qn("w:abstractNumId"))
+        ar.set(qn("w:val"), abs_id)
+
+        # ── link each heading style to its level ──
+        for ilvl in range(levels):
+            try:
+                style = self.doc.styles[f"Heading {ilvl + 1}"]
+                pPr = style.element.find(qn("w:pPr"))
+                if pPr is None:
+                    pPr = _etree.SubElement(style.element, qn("w:pPr"))
+                numPr = _etree.SubElement(pPr, qn("w:numPr"))
+                ilvl_elem = _etree.SubElement(numPr, qn("w:ilvl"))
+                ilvl_elem.set(qn("w:val"), str(ilvl))
+                nid = _etree.SubElement(numPr, qn("w:numId"))
+                nid.set(qn("w:val"), num_id)
+            except KeyError:
+                pass
+
+        self._heading_num_id = num_id
         return self
 
     def preset_english(
@@ -745,6 +1028,128 @@ class DocxBuilder:
                         int(color[:2], 16), int(color[2:4], 16), int(color[4:6], 16)
                     )
         return self
+
+    # ── numbered / bullet lists ─────────────────────────────────
+
+    _LIST_FORMATS = {
+        "decimal": ("decimal", "%1."),
+        "bullet": ("bullet", "\u2022"),
+        "chineseCounting": ("chineseCounting", "\u4e00\u3001"),
+        "upperRoman": ("upperRoman", "%1."),
+        "lowerRoman": ("lowerRoman", "%1."),
+        "upperLetter": ("upperLetter", "%1."),
+        "lowerLetter": ("lowerLetter", "%1."),
+        "decimalParen": ("decimal", "\uff08%1\uff09"),  # （1）
+        "decimalParen2": ("decimal", "%1)"),              # 1)
+        "chineseParen": ("chineseCounting", "\uff08%1\uff09"),  # （一）
+    }
+
+    def add_numbered_list(self, items, *, format="decimal", lvl_text=None,
+                          start=1, hanging=360, left_indent=720,
+                          font=None, size=None):
+        """Add a numbered or bullet list.
+
+        ``items`` may be:
+            - a list of strings (flat list, all ilvl=0)
+            - a list of ``(text, level)`` tuples (multi-level)
+
+        ``format`` is one of the keys in ``_LIST_FORMATS`` (see above), or
+        a raw ``numFmt`` value like ``"decimal"``, ``"bullet"``, ``"chineseCounting"``,
+        ``"upperRoman"``, etc.  ``lvl_text`` overrides the default template string
+        (e.g. ``"（%1）"``, ``"%1.%2."``, ``"\u2022"`` for bullets).
+
+        Returns *self* for chaining.
+        """
+        from lxml import etree as _etree
+        # ── detect multi-level ──
+        if items and isinstance(items[0], (list, tuple)):
+            levels_present = sorted(set(lvl for _, lvl in items))
+        else:
+            levels_present = [0]
+            items = [(t, 0) for t in items]  # type: ignore[arg-type]
+
+        max_level = max(levels_present)
+
+        # ── resolve format ──
+        fmt_entry = self._LIST_FORMATS.get(format, (format, lvl_text or "%1."))
+        num_fmt_val, default_lvl_text = fmt_entry
+
+        # ── numbering part ──
+        numbering_part = self.doc.part.numbering_part
+        numbering_elem = numbering_part.element
+        ns_w = f"{{{_W_NS}}}"
+
+        # avoid ID conflicts
+        existing_abs = [int(e.get(f"{{{_W_NS}}}abstractNumId", "0"))
+                        for e in numbering_elem.findall(f"{ns_w}abstractNum")]
+        existing_nums = [int(e.get(f"{{{_W_NS}}}numId", "0"))
+                         for e in numbering_elem.findall(f"{ns_w}num")]
+        abs_id = str(max(existing_abs) + 1 if existing_abs else 0)
+        num_id = str(max(existing_nums) + 1 if existing_nums else 1)
+
+        # ── abstractNum ──
+        abs_elem = _etree.SubElement(numbering_elem, qn("w:abstractNum"))
+        abs_elem.set(qn("w:abstractNumId"), abs_id)
+        mlt = _etree.SubElement(abs_elem, qn("w:multiLevelType"))
+        mlt.set(qn("w:val"), "hybridMultilevel" if max_level > 0 else "singleLevel")
+
+        for ilvl in range(max_level + 1):
+            lvl_elem = _etree.SubElement(abs_elem, qn("w:lvl"))
+            lvl_elem.set(qn("w:ilvl"), str(ilvl))
+            lvl_elem.set(qn("w:tentative"), "0")
+
+            s = _etree.SubElement(lvl_elem, qn("w:start"))
+            s.set(qn("w:val"), str(start))
+
+            nf = _etree.SubElement(lvl_elem, qn("w:numFmt"))
+            nf.set(qn("w:val"), num_fmt_val)
+
+            # lvl_text: use user-provided, or auto-concatenate for multi-level
+            if lvl_text:
+                lt_val = lvl_text
+            elif max_level > 0:
+                lt_val = ".".join(f"%{i+1}" for i in range(ilvl + 1)) + "."
+            else:
+                lt_val = default_lvl_text
+
+            lt = _etree.SubElement(lvl_elem, qn("w:lvlText"))
+            lt.set(qn("w:val"), lt_val)
+
+            jc = _etree.SubElement(lvl_elem, qn("w:lvlJc"))
+            jc.set(qn("w:val"), "left")
+
+            pPr = _etree.SubElement(lvl_elem, qn("w:pPr"))
+            ind = _etree.SubElement(pPr, qn("w:ind"))
+            ind.set(qn("w:left"), str(left_indent))
+            ind.set(qn("w:hanging"), str(hanging))
+
+        # ── num instance ──
+        num_elem = _etree.SubElement(numbering_elem, qn("w:num"))
+        num_elem.set(qn("w:numId"), num_id)
+        ar = _etree.SubElement(num_elem, qn("w:abstractNumId"))
+        ar.set(qn("w:val"), abs_id)
+
+        # ── paragraphs with numPr ──
+        for text, ilvl in items:
+            p = self.doc.add_paragraph()
+            pPr = p._p.get_or_add_pPr()
+            numPr = _etree.SubElement(pPr, qn("w:numPr"))
+            ie = _etree.SubElement(numPr, qn("w:ilvl"))
+            ie.set(qn("w:val"), str(ilvl))
+            nid = _etree.SubElement(numPr, qn("w:numId"))
+            nid.set(qn("w:val"), num_id)
+            run = p.add_run(str(text))
+            if font:
+                run.font.name = font
+            if size is not None:
+                from docx.shared import Pt as _Pt
+                run.font.size = _Pt(size)
+
+        return self
+
+    def add_bullet_list(self, items):
+        """Convenience: add a bulleted list. Calls ``add_numbered_list(format="bullet")``."""
+        return self.add_numbered_list(items, format="bullet", hanging=360, left_indent=720)
 
     def add_formula(self, latex_str, display=True):
         """Insert a LaTeX formula as native OMML.
@@ -1673,6 +2078,113 @@ class DocxUtil:
         doc.save(output_path)
         print(f"Applied theme: {input_path} + {theme_path} -> {output_path}")
 
+    # ── set_fonts ──────────────────────────────────────────────
+
+    @staticmethod
+    def set_fonts(input_path, output_path, body_font="宋体", heading_font="黑体",
+                  body_latin="Times New Roman", heading_latin="Times New Roman",
+                  retarget_runs=True,
+                  code_fonts=("Consolas", "Courier New", "Courier", "Menlo", "Monaco")):
+        """Retarget body/heading fonts on an existing document.
+
+        Useful when a document already has content and only its typography needs
+        switching to Chinese thesis conventions (headings 黑体 / body 宋体).
+
+        - Heading styles are matched by style id or name containing
+          ``Heading`` / ``Title`` / ``Subtitle``; everything else is body.
+        - ``docDefaults`` is rewritten too, so styles without explicit fonts follow.
+        - Theme font references (``asciiTheme`` & co.) are removed, otherwise Word
+          keeps resolving them and silently ignores the explicit font.
+        - ``stylesWithEffects.xml`` is updated as well when present, since some
+          Word versions still consult it.
+        - ``retarget_runs`` also rewrites run-level fonts in the body, skipping
+          monospace (code) runs so code blocks stay monospaced.
+        """
+
+        def apply(rpr, ea, latin):
+            rfonts = rpr.find(qn("w:rFonts"))
+            if rfonts is None:
+                rfonts = etree.SubElement(rpr, qn("w:rFonts"))
+            for attr in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+                rfonts.attrib.pop(qn("w:" + attr), None)
+            rfonts.set(qn("w:ascii"), latin)
+            rfonts.set(qn("w:hAnsi"), latin)
+            rfonts.set(qn("w:eastAsia"), ea)
+            rfonts.set(qn("w:cs"), latin)
+
+        def fonts_for(style_id, name):
+            key = (style_id or "") + "|" + (name or "")
+            if any(k in key for k in ("Heading", "Title", "Subtitle")):
+                return heading_font, heading_latin
+            return body_font, body_latin
+
+        def transform_styles(data):
+            root = etree.fromstring(data)
+            defaults = root.find(qn("w:docDefaults"))
+            if defaults is not None:
+                rpr = defaults.find(qn("w:rPrDefault") + "/" + qn("w:rPr"))
+                if rpr is not None:
+                    apply(rpr, body_font, body_latin)
+            count = 0
+            for style in root.findall(qn("w:style")):
+                name_el = style.find(qn("w:name"))
+                ea, latin = fonts_for(
+                    style.get(qn("w:styleId")),
+                    name_el.get(qn("w:val")) if name_el is not None else "",
+                )
+                rpr = style.find(qn("w:rPr"))
+                if rpr is None:
+                    rpr = etree.SubElement(style, qn("w:rPr"))
+                apply(rpr, ea, latin)
+                count += 1
+            return etree.tostring(root, xml_declaration=True,
+                                  encoding="UTF-8", standalone=True), count
+
+        def transform_runs(data):
+            root = etree.fromstring(data)
+            changed = 0
+            for run in root.iter(qn("w:r")):
+                rfonts = run.find(qn("w:rPr") + "/" + qn("w:rFonts"))
+                if rfonts is None:
+                    continue                      # inherits from its paragraph style
+                current = rfonts.get(qn("w:ascii")) or rfonts.get(qn("w:hAnsi")) or ""
+                if current in code_fonts:
+                    ea, latin = body_font, current  # keep code monospaced
+                else:
+                    ea, latin = body_font, body_latin
+                apply(rfonts.getparent(), ea, latin)
+                changed += 1
+            return etree.tostring(root, xml_declaration=True,
+                                  encoding="UTF-8", standalone=True), changed
+
+        styles_name = "word/styles.xml"
+        effects_name = "word/stylesWithEffects.xml"
+        doc_name = "word/document.xml"
+
+        zin = zipfile.ZipFile(input_path, "r")
+        new_styles, n_styles = transform_styles(zin.read(styles_name))
+        new_effects = transform_styles(zin.read(effects_name))[0] \
+            if effects_name in zin.namelist() else None
+        new_doc, n_runs = (transform_runs(zin.read(doc_name))
+                           if retarget_runs else (None, 0))
+
+        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == styles_name:
+                    data = new_styles
+                elif item.filename == effects_name and new_effects is not None:
+                    data = new_effects
+                elif item.filename == doc_name and new_doc is not None:
+                    data = new_doc
+                zout.writestr(item, data)
+        zin.close()
+
+        print(f"Set fonts: {input_path} -> {output_path}")
+        print(f"  body={body_font}/{body_latin}  heading={heading_font}/{heading_latin}")
+        print(f"  styles={n_styles}  runs_retargeted={n_runs}")
+        return output_path
+
     # ── convert_to_doc ─────────────────────────────────────────
 
     @staticmethod
@@ -1823,6 +2335,22 @@ def _cli():
     p_theme.add_argument("theme", help="Theme file path")
     p_theme.add_argument("output", help="Output .docx path")
 
+    # ── set-fonts ──────────────────────────────────────────────
+    p_fonts = sub.add_parser(
+        "set-fonts",
+        help="Retarget body/heading fonts of an existing .docx (e.g. 宋体 + 黑体)",
+    )
+    p_fonts.add_argument("input", help="Input .docx path")
+    p_fonts.add_argument("output", help="Output .docx path")
+    p_fonts.add_argument("--body", default="宋体", help="Body East Asian font (default: 宋体)")
+    p_fonts.add_argument("--heading", default="黑体", help="Heading East Asian font (default: 黑体)")
+    p_fonts.add_argument("--body-latin", default="Times New Roman",
+                         help="Latin font for body text")
+    p_fonts.add_argument("--heading-latin", default="Times New Roman",
+                         help="Latin font for headings")
+    p_fonts.add_argument("--styles-only", action="store_true",
+                         help="Change styles only, leave run-level fonts untouched")
+
     args = parser.parse_args()
 
     if args.cmd == "create":
@@ -1917,6 +2445,14 @@ def _cli():
 
     elif args.cmd == "apply-theme":
         DocxUtil.apply_theme(args.input, args.theme, args.output)
+
+    elif args.cmd == "set-fonts":
+        DocxUtil.set_fonts(
+            args.input, args.output,
+            body_font=args.body, heading_font=args.heading,
+            body_latin=args.body_latin, heading_latin=args.heading_latin,
+            retarget_runs=not args.styles_only,
+        )
 
 
 if __name__ == "__main__":
