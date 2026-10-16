@@ -14,6 +14,10 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════
 # Use bundled site-packages (if present)
 # ═══════════════════════════════════════════════════════════════
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_SKILL_DIR = _SCRIPT_DIR.parent
+_BUNDLED = _SKILL_DIR / "site-packages"
+
 # Dependencies come from the selected Python environment, not copied packages.
 
 # Check for lxml (C extension, must be system-installed)
@@ -131,7 +135,14 @@ def _omml_convert(ml_elem, omml_parent):
 
     elif tag == "mfrac":
         e = SubElement(omml_parent, f"{{{_OMML_NS}}}f")
-        SubElement(e, f"{{{_OMML_NS}}}fPr")
+        fpr = SubElement(e, f"{{{_OMML_NS}}}fPr")
+        # \binom arrives as <mfrac linethickness="0"> — must render without a bar
+        try:
+            no_bar = float(ml_elem.get("linethickness", "")) == 0.0
+        except ValueError:
+            no_bar = False
+        if no_bar:
+            SubElement(fpr, f"{{{_OMML_NS}}}type").set(f"{{{_OMML_NS}}}val", "noBar")
         num = SubElement(e, f"{{{_OMML_NS}}}num")
         den = SubElement(e, f"{{{_OMML_NS}}}den")
         if kids:
@@ -278,8 +289,22 @@ def _mathml_to_omml(mathml_root):
 
 
 def _mathml_to_omml_inline(mathml_root):
+    """Inline equation: returns a single <m:oMath> element (no oMathPara wrapper).
+
+    Converts MathML content directly into the oMath root. Never nests another
+    oMath inside it: Word rejects <m:oMath><m:oMath>...</m:oMath></m:oMath>.
+    """
     from xml.etree.ElementTree import Element
-    return _mathml_to_omml_inner(mathml_root, Element(f"{{{_OMML_NS}}}oMath"))
+    root = Element(f"{{{_OMML_NS}}}oMath")
+    for child in list(mathml_root):
+        if _omml_tag(child) == "semantics":
+            for sc in child:
+                if _omml_tag(sc) == "mrow":
+                    _omml_convert(sc, root)
+                    break
+        else:
+            _omml_convert(child, root)
+    return root
 
 
 def _fix_mathml(mathml_root):
@@ -474,6 +499,109 @@ def _fix_mathml(mathml_root):
             else:
                 i += 1
 
+    _NARY_ABORT_OPS = {
+        "=", "\u2260", "<", ">", "\u2264", "\u2265", "\u2248", "\u221D", ",", ";", ":",
+    }
+
+    def _has_differential(elem):
+        """True if elem's direct children contain a differential (mi 'd' + variable)."""
+        kids = list(elem)
+        for j in range(len(kids) - 1):
+            if _is_mi_text(kids[j], 'd') and _tag(kids[j + 1]) == 'mi':
+                return True
+        return False
+
+    def _attach_nary_operands(parent):
+        """Attach following siblings as the n-ary operand (munderover 4th child).
+
+        latex2mathml keeps the integrand/summand as later siblings of the limits
+        element, leaving m:nary/m:e empty — Word renders a detached gap.
+        Attachment runs right-to-left so nested operators bind to their own
+        operand first. Conservative boundary policy:
+        - ∫/∮: consume siblings up to and including the first top-level
+          differential (mi 'd' + variable, or a brace/mfenced group containing
+          one); all-or-nothing — if a relation operator or the end of the row
+          comes first, consume nothing (old rendering, no meaning change).
+          The consumed siblings are wrapped in a single mrow (kids[3] slot).
+        - ∑/∏: consume exactly ONE following sibling (never an operator), so
+          '= C' and adjacent terms are never swallowed.
+        - Bare mo ∫/∮ (no limits): same differential rule, but the operator is
+          first promoted to munderover[mo, mrow(), mrow(), operand] so OMML
+          emits a real m:nary.
+        Note: xml.etree insert/append does NOT reparent — every move here is
+        paired with an explicit parent.remove().
+        """
+        from xml.etree.ElementTree import Element as _El
+
+        def _wrap_operand(dest_elem, insert_at, nodes):
+            wrap = _El(f'{{{_MATHML_NS}}}mrow')
+            for n in nodes:
+                wrap.append(n)
+            dest_elem.insert(insert_at, wrap)
+
+        def _find_integral_end(row, start):
+            """Index of last consumed sibling (inclusive), or None."""
+            for k in range(start, len(row)):
+                cur = row[k]
+                if _is_mi_text(cur, 'd') and k + 1 < len(row) and _tag(row[k + 1]) == 'mi':
+                    return k + 1
+                if _tag(cur) in ('mrow', 'mfenced') and _has_differential(cur):
+                    return k
+                if _tag(cur) == 'mo' and cur.text in _NARY_ABORT_OPS:
+                    return None
+            return None
+
+        i = len(parent) - 1
+        while i >= 0:
+            elem = parent[i]
+            is_muo = _tag(elem) == 'munderover'
+            is_bare_int = (_tag(elem) == 'mo'
+                           and elem.text in ('\u222B', '\u222E'))
+            if not (is_muo or is_bare_int):
+                i -= 1
+                continue
+            if is_muo:
+                kids = list(elem)
+                if len(kids) != 3 or _tag(kids[0]) != 'mo':
+                    i -= 1
+                    continue
+                op = kids[0].text
+                if op not in ('\u222B', '\u222E', '\u2211', '\u220F'):
+                    i -= 1
+                    continue
+            else:
+                op = elem.text
+            row = list(parent)
+            if i + 1 >= len(row):
+                i -= 1
+                continue
+            if op in ('\u2211', '\u220F'):
+                single = row[i + 1]
+                if _tag(single) == 'mspace' and i + 2 < len(row):
+                    single = row[i + 2]
+                if _tag(single) not in ('mo', 'mspace'):
+                    elem.append(single)
+                    parent.remove(single)
+            else:
+                end = _find_integral_end(row, i + 1)
+                if end is not None:
+                    moved = row[i + 1:end + 1]
+                    if is_bare_int:
+                        muo = _El(f'{{{_MATHML_NS}}}munderover')
+                        muo.append(elem)
+                        muo.append(_El(f'{{{_MATHML_NS}}}mrow'))  # empty sub
+                        muo.append(_El(f'{{{_MATHML_NS}}}mrow'))  # empty sup
+                        _wrap_operand(muo, 3, moved)
+                        parent.remove(elem)
+                        for n in moved:
+                            parent.remove(n)
+                        parent.insert(i, muo)
+                    else:
+                        _wrap_operand(elem, 3, moved)
+                        for n in moved:
+                            parent.remove(n)
+            i -= 1
+
     def _recurse(elem):
         """Process element and all descendants."""
         for child in list(elem):
@@ -483,6 +611,7 @@ def _fix_mathml(mathml_root):
             _process_nary_operators(elem)
             _process_text_prefixes(elem)
             _process_delimiters(elem)
+            _attach_nary_operands(elem)
 
     _recurse(mathml_root)
     return mathml_root
@@ -746,12 +875,11 @@ class ThemedDocument:
         return tbl
 
     def formula(self, latex_str):
-        """Insert a centered LaTeX formula."""
+        """Insert a centered LaTeX formula (block-level: w:p > m:oMathPara)."""
         p = self.doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         omml = latex_to_omml(latex_str)
-        run = p.add_run("")
-        run._element.append(etree.fromstring(omml))
+        p._element.append(etree.fromstring(omml))
         return p
 
     def cover(self, title_text, info_lines):

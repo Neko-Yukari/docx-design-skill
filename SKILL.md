@@ -1,6 +1,6 @@
 ---
 name: docx
-description: Read, create, and edit Word documents (.docx and .doc) using dependencies installed in the selected Python environment. Supports LaTeX formulas, Chinese typesetting, modular themes, and Word style integration. Use when working with .docx/.doc files — reading, creating, editing, filling templates, generating thesis papers, or converting LaTeX to Word equations.
+description: Use environment-installed Python dependencies to read, create, and edit Word documents (.docx and .doc) on any platform. Supports LaTeX formulas, Chinese typesetting, modular themes, and Word style integration. Use when working with .docx/.doc files — reading, creating, editing, filling templates, generating thesis papers, or converting LaTeX to Word equations.
 license: MIT
 ---
 
@@ -26,7 +26,7 @@ Read, create, edit Word documents on Windows using `python-docx`.
 
 | Task | CLI | Python API |
 |------|-----|------------|
-| **Install dependencies** | `python -m pip install -r requirements.txt` | Use the same Python environment as the scripts |
+| **Install dependencies** | `python -m pip install -r requirements.txt` | Use the scripts’ Python environment |
 | **Create** new .docx | `docx_tool.py create --output out.docx --preset chinese ...` | `DocxBuilder().preset_chinese().add_heading(...).save(...)` |
 | **Read/Extract** .docx | `docx_tool.py extract file.docx --output file.md` | `DocxReader(file).extract_to_markdown(...)` |
 | **Search** in .docx | `docx_tool.py extract file.docx --grep "keyword"` | `DocxReader(file).grep(...)` |
@@ -517,6 +517,15 @@ Key XML files: `word/document.xml` (body), `word/comments.xml`, `word/media/` (i
 ```
 
 Element reference: `<m:f>`=fraction, `<m:sSup>`=superscript, `<m:sSub>`=subscript, `<m:rad>`=radical (√), `<m:nary>`=∑/∫/∏, `<m:r><m:t>`=text.
+
+**Binomial coefficients**: `\binom{a}{b}` arrives from latex2mathml as `<mfrac linethickness="0">`; the converter maps it to `<m:f><m:fPr><m:type m:val="noBar"/>` — a stacked layout with **no fraction bar**. Ordinary `\frac` keeps the default bar. Inline conversion produces exactly one `m:oMath` (never nested `oMath` inside `oMath` — Word rejects that as corruption).
+
+**N-ary operators (∫ ∑ ∏ ∮)**: the integrand/summand is attached as the `m:nary` operand (`m:e`), eliminating a detached gap between the operator and its operand. Boundary policy is conservative and all-or-nothing:
+- `\int/\oint`: consumes up to and including the first top-level differential (`d<var>`, or a braced group containing one). If a relation operator (`=`, `<`, `,` …) or the row ends first, nothing is attached.
+- `\sum/\prod`: consumes exactly one following sibling term — `= C` and adjacent terms are never swallowed.
+- No-limit `\int x\,dx`: promoted to a real `m:nary` with empty limits.
+- Nested operators bind right-to-left, so inner integrals keep their own operands.
+- Known limitation: an integral whose integrand has no explicit `d<var>` differential (e.g. `\int_0^1 f(x) = C`) intentionally keeps the old detached rendering rather than guessing the operand extent.
 
 Unicode: `\u00B1`=±, `\u2211`=∑, `\u222B`=∫, `\u221E`=∞, `\u03C0`=π.
 

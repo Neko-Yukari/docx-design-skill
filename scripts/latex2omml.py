@@ -40,6 +40,161 @@ def _extract_text(elem):
     return ''.join(parts)
 
 
+_NARY_ABORT_OPS = {
+    '=', '\u2260', '<', '>', '\u2264', '\u2265', '\u2248', '\u221D', ',', ';', ':',
+}
+
+
+def _is_mi_text(elem, text):
+    return _tag(elem) == 'mi' and elem.text == text
+
+
+def _has_differential(elem):
+    """True if elem's direct children contain a differential (mi 'd' + variable)."""
+    kids = list(elem)
+    for j in range(len(kids) - 1):
+        if _is_mi_text(kids[j], 'd') and _tag(kids[j + 1]) == 'mi':
+            return True
+    return False
+
+
+def _attach_nary_operands(parent):
+    """Attach following siblings as the n-ary operand (munderover 4th child).
+
+    latex2mathml keeps the integrand/summand as later siblings of the limits
+    element, leaving m:nary/m:e empty — Word renders a detached gap. This
+    standalone variant also promotes msubsup/msub with an n-ary operator base
+    to munderover (docx_tool._fix_mathml does that in a separate pass).
+    Attachment runs right-to-left so nested operators bind to their own
+    operand first. Conservative boundary policy:
+    - ∫/∮: consume siblings up to and including the first top-level
+      differential (mi 'd' + variable, or a brace/mfenced group containing
+      one); all-or-nothing — if a relation operator or the end of the row
+      comes first, consume nothing (old rendering, no meaning change).
+      The consumed siblings are wrapped in a single mrow (kids[3] slot).
+    - ∑/∏: consume exactly ONE following sibling (never an operator), so
+      '= C' and adjacent terms are never swallowed.
+    - Bare mo ∫/∮ (no limits): same differential rule, but the operator is
+      first promoted to munderover[mo, mrow(), mrow(), operand] so OMML
+      emits a real m:nary.
+    Note: xml.etree insert/append does NOT reparent — every move here is
+    paired with an explicit parent.remove().
+    """
+    def _wrap_operand(dest_elem, insert_at, nodes):
+        wrap = Element(f'{{{MATHML_NS}}}mrow')
+        for n in nodes:
+            wrap.append(n)
+        dest_elem.insert(insert_at, wrap)
+
+    def _promote_msubsup(elem):
+        """msubsup/msub with n-ary mo base -> munderover (3 kids), else None."""
+        kids = list(elem)
+        if not kids or _tag(kids[0]) != 'mo':
+            return None
+        if kids[0].text not in ('\u222B', '\u222E', '\u2211', '\u220F'):
+            return None
+        muo = Element(f'{{{MATHML_NS}}}munderover')
+        muo.append(kids[0])
+        sub = Element(f'{{{MATHML_NS}}}mrow')
+        if len(kids) > 1:
+            sub.append(kids[1])
+        sup = Element(f'{{{MATHML_NS}}}mrow')
+        if len(kids) > 2:
+            sup.append(kids[2])
+        muo.append(sub)
+        muo.append(sup)
+        return muo
+
+    def _find_integral_end(row, start):
+        """Index of last consumed sibling (inclusive), or None."""
+        for k in range(start, len(row)):
+            cur = row[k]
+            if _is_mi_text(cur, 'd') and k + 1 < len(row) and _tag(row[k + 1]) == 'mi':
+                return k + 1
+            if _tag(cur) in ('mrow', 'mfenced') and _has_differential(cur):
+                return k
+            if _tag(cur) == 'mo' and cur.text in _NARY_ABORT_OPS:
+                return None
+        return None
+
+    i = len(parent) - 1
+    while i >= 0:
+        elem = parent[i]
+        promoted = None
+        if _tag(elem) in ('msubsup', 'msub'):
+            promoted = _promote_msubsup(elem)
+        is_muo = _tag(elem) == 'munderover' or promoted is not None
+        is_bare_int = (_tag(elem) == 'mo'
+                       and elem.text in ('\u222B', '\u222E'))
+        if not (is_muo or is_bare_int):
+            i -= 1
+            continue
+        if promoted is not None:
+            op = list(promoted)[0].text
+        elif is_muo:
+            kids = list(elem)
+            if len(kids) != 3 or _tag(kids[0]) != 'mo':
+                i -= 1
+                continue
+            op = kids[0].text
+            if op not in ('\u222B', '\u222E', '\u2211', '\u220F'):
+                i -= 1
+                continue
+        else:
+            op = elem.text
+        row = list(parent)
+        if i + 1 >= len(row):
+            i -= 1
+            continue
+        if op in ('\u2211', '\u220F'):
+            single = row[i + 1]
+            if _tag(single) == 'mspace' and i + 2 < len(row):
+                single = row[i + 2]
+            if _tag(single) not in ('mo', 'mspace'):
+                if promoted is not None:
+                    promoted.append(single)
+                    parent.remove(elem)
+                    parent.remove(single)
+                    parent.insert(i, promoted)
+                else:
+                    elem.append(single)
+                    parent.remove(single)
+        else:
+            end = _find_integral_end(row, i + 1)
+            if end is not None:
+                moved = row[i + 1:end + 1]
+                if is_bare_int:
+                    muo = Element(f'{{{MATHML_NS}}}munderover')
+                    muo.append(elem)
+                    muo.append(Element(f'{{{MATHML_NS}}}mrow'))  # empty sub
+                    muo.append(Element(f'{{{MATHML_NS}}}mrow'))  # empty sup
+                    _wrap_operand(muo, 3, moved)
+                    parent.remove(elem)
+                    for n in moved:
+                        parent.remove(n)
+                    parent.insert(i, muo)
+                else:
+                    dest = promoted if promoted is not None else elem
+                    _wrap_operand(dest, 3, moved)
+                    for n in moved:
+                        parent.remove(n)
+                    if promoted is not None:
+                        parent.remove(elem)
+                        parent.insert(i, promoted)
+        i -= 1
+
+
+def _fix_nary_operands(mathml_root):
+    """Apply n-ary operand attachment to every grouping element."""
+    def _recurse(elem):
+        for child in list(elem):
+            _recurse(child)
+        if _tag(elem) in ('mrow', 'math', 'mstyle'):
+            _attach_nary_operands(elem)
+    _recurse(mathml_root)
+    return mathml_root
+
+
 def _add_text_run(parent, text):
     r = SubElement(parent, f'{{{OMML_NS}}}r')
     t = SubElement(r, f'{{{OMML_NS}}}t')
@@ -81,7 +236,14 @@ def _convert(ml_elem, omml_parent):
 
     elif tag == 'mfrac':
         e = SubElement(omml_parent, f'{{{OMML_NS}}}f')
-        SubElement(e, f'{{{OMML_NS}}}fPr')
+        fpr = SubElement(e, f'{{{OMML_NS}}}fPr')
+        # \binom arrives as <mfrac linethickness="0"> — must render without a bar
+        try:
+            no_bar = float(ml_elem.get('linethickness', '')) == 0.0
+        except ValueError:
+            no_bar = False
+        if no_bar:
+            SubElement(fpr, f'{{{OMML_NS}}}type').set(f'{{{OMML_NS}}}val', 'noBar')
         num = SubElement(e, f'{{{OMML_NS}}}num')
         den = SubElement(e, f'{{{OMML_NS}}}den')
         if kids: _convert(kids[0], num)
@@ -177,20 +339,34 @@ def mathml_to_omml(mathml_root):
 
 
 def mathml_to_omml_inline(mathml_root):
-    """Inline equation: returns <m:oMath> element (no oMathPara wrapper).
-    
+    """Inline equation: returns a single <m:oMath> element (no oMathPara wrapper).
+
+    Converts MathML content directly into the oMath root. Never nests another
+    oMath inside it: Word rejects <m:oMath><m:oMath>...</m:oMath></m:oMath>.
     Inline OMML generates m:oMath directly. Per OOXML spec, m:oMathPara is ONLY for
     block-level display equations and MUST be a direct child of w:p, never inside w:r.
     """
-    return _mathml_to_omml_inner(mathml_root, Element(f'{{{OMML_NS}}}oMath'))
+    root = Element(f'{{{OMML_NS}}}oMath')
+    for child in list(mathml_root):
+        t = _tag(child)
+        if t == 'semantics':
+            for sc in child:
+                if _tag(sc) == 'mrow':
+                    _convert(sc, root)
+                    break
+        else:
+            _convert(child, root)
+    return root
 
 
 def latex_to_omml(latex_str, inline=False):
     ml = _latex_converter.convert(latex_str)
     if 'xmlns' not in ml[:200]:
         ml = ml.replace('<math', f'<math xmlns="{MATHML_NS}"', 1)
+    root = fromstring(ml)
+    _fix_nary_operands(root)
     converter = mathml_to_omml_inline if inline else mathml_to_omml
-    return tostring(converter(fromstring(ml)), encoding='unicode')
+    return tostring(converter(root), encoding='unicode')
 
 
 def insert_formula(paragraph, latex_str):
